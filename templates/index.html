@@ -1,0 +1,1236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>知识库AI回答系统</title>
+    <style>
+        :root {
+            --pwc-orange: #D04A02;
+            --pwc-orange-dark: #B03D00;
+            --pwc-orange-light: #FFF3ED;
+            --pwc-dark: #2D2D2D;
+            --pwc-gray-1: #58595B;
+            --pwc-gray-2: #8A8C8E;
+            --pwc-gray-3: #BCBEC0;
+            --pwc-gray-4: #E8E8E8;
+            --pwc-gray-5: #F4F4F4;
+            --pwc-white: #FFFFFF;
+            --pwc-teal: #00A3A1;
+            --pwc-red: #CB333B;
+            --pwc-green: #2A9D8F;
+            --font-family: 'PwC Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: var(--font-family);
+            background: var(--pwc-gray-5);
+            min-height: 100vh;
+            color: var(--pwc-dark);
+        }
+
+        /* ===== Top Navigation Bar ===== */
+        .top-bar {
+            background: var(--pwc-dark);
+            padding: 0 32px;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .top-bar .logo {
+            display: flex;
+            align-items: baseline;
+            gap: 2px;
+        }
+
+        .logo-text {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--pwc-orange);
+            letter-spacing: 2px;
+        }
+
+        .top-bar .page-title {
+            color: var(--pwc-white);
+            font-size: 15px;
+            margin-left: 24px;
+            padding-left: 24px;
+            border-left: 1px solid var(--pwc-gray-1);
+            font-weight: 400;
+            opacity: 0.85;
+        }
+
+        /* ===== Orange accent stripe ===== */
+        .accent-stripe {
+            height: 3px;
+            background: var(--pwc-orange);
+        }
+
+        /* ===== Main Container ===== */
+        .container {
+            max-width: 1100px;
+            margin: 28px auto;
+            padding: 0 24px;
+        }
+
+        /* ===== Card ===== */
+        .card {
+            background: var(--pwc-white);
+            border-radius: 6px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+            border: 1px solid var(--pwc-gray-4);
+            padding: 32px;
+            margin-bottom: 24px;
+        }
+
+        .card-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--pwc-dark);
+            padding-bottom: 12px;
+            border-bottom: 2px solid var(--pwc-orange);
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .card-title::before {
+            content: '';
+            display: inline-block;
+            width: 4px;
+            height: 18px;
+            background: var(--pwc-orange);
+            border-radius: 2px;
+        }
+
+        /* ===== Upload Area ===== */
+        .upload-area {
+            border: 2px dashed var(--pwc-gray-3);
+            border-radius: 6px;
+            padding: 48px 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            background: var(--pwc-gray-5);
+        }
+
+        .upload-area:hover {
+            background: var(--pwc-orange-light);
+            border-color: var(--pwc-orange);
+        }
+
+        .upload-area.dragover {
+            background: var(--pwc-orange-light);
+            border-color: var(--pwc-orange);
+            box-shadow: inset 0 0 0 1px var(--pwc-orange);
+        }
+
+        .upload-icon {
+            font-size: 40px;
+            margin-bottom: 12px;
+        }
+
+        .upload-text {
+            color: var(--pwc-gray-1);
+            font-size: 15px;
+            line-height: 1.8;
+        }
+
+        .upload-text strong { color: var(--pwc-orange); }
+
+        .upload-text small {
+            color: var(--pwc-gray-2);
+            font-size: 13px;
+        }
+
+        #fileInput { display: none; }
+
+        /* ===== Buttons ===== */
+        .btn {
+            display: inline-block;
+            padding: 10px 28px;
+            font-size: 14px;
+            font-weight: 600;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: background 0.2s ease;
+            margin: 4px;
+            letter-spacing: 0.3px;
+        }
+
+        .btn-primary {
+            background: var(--pwc-orange);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: var(--pwc-orange-dark);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: var(--pwc-white);
+            color: var(--pwc-dark);
+            border: 1px solid var(--pwc-gray-3);
+        }
+
+        .btn-secondary:hover {
+            background: var(--pwc-gray-5);
+            border-color: var(--pwc-gray-2);
+        }
+
+        .btn-success {
+            background: var(--pwc-green);
+            color: white;
+        }
+
+        .btn-success:hover {
+            background: #238B7E;
+        }
+
+        .btn-sm {
+            padding: 5px 14px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        /* ===== File Info ===== */
+        .file-info {
+            display: none;
+            margin-top: 20px;
+            padding: 16px 20px;
+            background: var(--pwc-gray-5);
+            border-radius: 4px;
+            border-left: 4px solid var(--pwc-orange);
+        }
+
+        .file-info.show { display: block; }
+
+        .file-info h3 {
+            color: var(--pwc-dark);
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .file-info p {
+            color: var(--pwc-gray-1);
+            font-size: 14px;
+            margin: 4px 0;
+        }
+
+        .file-info p strong { color: var(--pwc-dark); }
+
+        .questions-preview {
+            max-height: 180px;
+            overflow-y: auto;
+            margin-top: 12px;
+            padding: 8px;
+            background: white;
+            border-radius: 3px;
+            border: 1px solid var(--pwc-gray-4);
+        }
+
+        .question-item {
+            padding: 6px 8px;
+            border-bottom: 1px solid var(--pwc-gray-5);
+            font-size: 13px;
+            color: var(--pwc-gray-1);
+        }
+
+        .question-item:last-child { border-bottom: none; }
+
+        /* ===== Options ===== */
+        .options {
+            margin: 20px 0;
+            padding: 16px 20px;
+            background: var(--pwc-gray-5);
+            border-radius: 4px;
+        }
+
+        .options > label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            color: var(--pwc-dark);
+        }
+
+        .options input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--pwc-orange);
+        }
+
+        .options input[type="radio"] {
+            accent-color: var(--pwc-orange);
+        }
+
+        .prompt-section {
+            display: none;
+            margin-top: 14px;
+            padding-top: 14px;
+            border-top: 1px solid var(--pwc-gray-4);
+        }
+
+        .prompt-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+
+        .prompt-header label {
+            font-weight: 600;
+            color: var(--pwc-dark);
+            font-size: 14px;
+        }
+
+        .prompt-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .prompt-hint {
+            color: var(--pwc-gray-2);
+            font-size: 12px;
+            display: block;
+            margin-bottom: 8px;
+        }
+
+        .prompt-hint code {
+            background: var(--pwc-gray-5);
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-size: 12px;
+            color: var(--pwc-orange);
+        }
+
+        textarea#scoringPrompt {
+            width: 100%;
+            font-size: 13px;
+            line-height: 1.7;
+            border: 1px solid var(--pwc-gray-3);
+            border-radius: 3px;
+            padding: 12px;
+            resize: vertical;
+            font-family: inherit;
+            color: var(--pwc-dark);
+            transition: border-color 0.2s;
+        }
+
+        textarea#scoringPrompt:focus {
+            outline: none;
+            border-color: var(--pwc-orange);
+            box-shadow: 0 0 0 2px rgba(208, 74, 2, 0.12);
+        }
+
+        .thread-options {
+            margin-top: 12px;
+            font-size: 14px;
+            color: var(--pwc-dark);
+        }
+
+        .thread-options span { font-weight: 500; }
+
+        .thread-options label {
+            margin: 0 8px;
+            cursor: pointer;
+            color: var(--pwc-gray-1);
+        }
+
+        /* ===== Progress ===== */
+        .progress-container {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .progress-container.show { display: block; }
+
+        .progress-bar {
+            height: 20px;
+            background: var(--pwc-gray-4);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-bottom: 8px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: var(--pwc-orange);
+            width: 0%;
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .progress-text {
+            text-align: center;
+            color: var(--pwc-gray-2);
+            font-size: 13px;
+        }
+
+        /* ===== Results Layout ===== */
+        .results-layout {
+            display: flex;
+            gap: 0;
+            min-height: 500px;
+            border: 1px solid var(--pwc-gray-4);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .results-sidebar {
+            width: 260px;
+            min-width: 260px;
+            background: var(--pwc-white);
+            border-right: 1px solid var(--pwc-gray-4);
+            overflow-y: auto;
+            max-height: 680px;
+        }
+
+        .sidebar-item {
+            padding: 12px 16px;
+            cursor: pointer;
+            border-bottom: 1px solid var(--pwc-gray-5);
+            transition: all 0.15s ease;
+            position: relative;
+        }
+
+        .sidebar-item:hover { background: var(--pwc-gray-5); }
+
+        .sidebar-item.active {
+            background: var(--pwc-orange-light);
+            border-left: 3px solid var(--pwc-orange);
+            padding-left: 13px;
+        }
+
+        .sidebar-item.error { border-left: 3px solid var(--pwc-red); }
+
+        .sidebar-num {
+            font-size: 11px;
+            color: var(--pwc-gray-2);
+            font-weight: 600;
+            margin-bottom: 3px;
+        }
+
+        .sidebar-item.active .sidebar-num { color: var(--pwc-orange); }
+
+        .sidebar-question {
+            font-size: 13px;
+            color: var(--pwc-dark);
+            line-height: 1.4;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .sidebar-score-badge {
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 10px;
+            margin-top: 4px;
+        }
+
+        .sidebar-score-badge.high { background: #E6F5F3; color: #2A9D8F; }
+        .sidebar-score-badge.mid { background: #FFF3ED; color: #D04A02; }
+        .sidebar-score-badge.low { background: #FEF2F2; color: #CB333B; }
+        .sidebar-score-badge.fail { background: #FEF2F2; color: #CB333B; }
+
+        .results-detail {
+            flex: 1;
+            overflow-y: auto;
+            max-height: 680px;
+            background: var(--pwc-gray-5);
+        }
+
+        .detail-empty {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--pwc-gray-3);
+            font-size: 14px;
+        }
+
+        .detail-content {
+            padding: 20px;
+        }
+
+        .detail-section {
+            background: white;
+            border-radius: 4px;
+            border: 1px solid var(--pwc-gray-4);
+            margin-bottom: 12px;
+            overflow: hidden;
+        }
+
+        .detail-section-header {
+            padding: 10px 16px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--pwc-dark);
+            background: var(--pwc-gray-5);
+            border-bottom: 1px solid var(--pwc-gray-4);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .detail-section-header .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--pwc-orange);
+        }
+
+        .detail-section-body {
+            padding: 14px 16px;
+            font-size: 13px;
+            color: var(--pwc-gray-1);
+            line-height: 1.7;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        /* ===== Scores in Detail ===== */
+        .detail-scores {
+            padding: 16px;
+        }
+
+        .detail-scores-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .detail-score-card {
+            text-align: center;
+            padding: 10px 4px;
+            background: var(--pwc-gray-5);
+            border-radius: 4px;
+            border: 1px solid var(--pwc-gray-4);
+        }
+
+        .detail-score-card .label {
+            font-size: 11px;
+            color: var(--pwc-gray-2);
+            margin-bottom: 4px;
+        }
+
+        .detail-score-card .value {
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        .detail-score-card .value.high { color: #2A9D8F; }
+        .detail-score-card .value.mid { color: #D04A02; }
+        .detail-score-card .value.low { color: #CB333B; }
+
+        .detail-score-card .reason {
+            font-size: 11px;
+            color: var(--pwc-gray-2);
+            text-align: left;
+            margin-top: 6px;
+            line-height: 1.4;
+        }
+
+        .detail-total-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--pwc-dark);
+            color: white;
+            padding: 10px 16px;
+            border-radius: 4px;
+        }
+
+        .detail-total-bar .label { font-size: 13px; color: rgba(255,255,255,0.7); }
+        .detail-total-bar .value { font-size: 24px; font-weight: 700; }
+
+        /* ===== Scores (progress items) ===== */
+        .scores-container {
+            margin-top: 12px;
+            padding: 14px;
+            background: white;
+            border-radius: 4px;
+            border: 1px solid var(--pwc-gray-4);
+        }
+
+        .scores-container > strong {
+            font-size: 14px;
+            color: var(--pwc-dark);
+        }
+
+        .scores-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .score-item {
+            text-align: center;
+            padding: 10px 6px;
+            background: var(--pwc-gray-5);
+            border-radius: 3px;
+            border: 1px solid var(--pwc-gray-4);
+        }
+
+        .score-label {
+            font-size: 11px;
+            color: var(--pwc-gray-2);
+            margin-bottom: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .score-value {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--pwc-orange);
+        }
+
+        .score-reason {
+            font-size: 11px;
+            color: var(--pwc-gray-2);
+            margin-top: 4px;
+            text-align: left;
+            line-height: 1.4;
+        }
+
+        .total-score {
+            grid-column: span 3;
+            background: var(--pwc-dark);
+            color: white;
+            border-color: var(--pwc-dark);
+        }
+
+        .total-score .score-value { color: var(--pwc-orange); }
+        .total-score .score-label { color: rgba(255,255,255,0.7); }
+
+        /* ===== Error Message ===== */
+        .error-message {
+            color: var(--pwc-red);
+            background: #FEF2F2;
+            padding: 12px 16px;
+            border-radius: 3px;
+            margin-top: 12px;
+            font-size: 14px;
+            border-left: 4px solid var(--pwc-red);
+            display: none;
+        }
+
+        .error-message.show { display: block; }
+
+        /* ===== Spinner ===== */
+        .loading-spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #ffffff;
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 0.8s linear infinite;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ===== Footer ===== */
+        .footer {
+            text-align: center;
+            padding: 16px;
+            color: var(--pwc-gray-3);
+            font-size: 12px;
+        }
+
+        /* ===== Buttons Bar ===== */
+        .buttons {
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 16px;
+            border-top: 1px solid var(--pwc-gray-4);
+        }
+
+        .download-section {
+            display: none;
+            text-align: center;
+            margin-top: 16px;
+        }
+
+        .download-section.show { display: block; }
+
+        /* ===== Summary Stats ===== */
+        .summary-stats {
+            display: none;
+            margin-top: 16px;
+            padding: 16px 20px;
+            background: var(--pwc-dark);
+            border-radius: 4px;
+            color: white;
+        }
+
+        .summary-stats.show { display: block; }
+
+        .summary-title {
+            font-size: 13px;
+            color: rgba(255,255,255,0.7);
+            margin-bottom: 10px;
+        }
+
+        .summary-grid {
+            display: flex;
+            gap: 12px;
+        }
+
+        .summary-item {
+            flex: 1;
+            text-align: center;
+            padding: 10px 8px;
+            background: rgba(255,255,255,0.08);
+            border-radius: 4px;
+        }
+
+        .summary-item .label {
+            font-size: 11px;
+            color: rgba(255,255,255,0.6);
+            margin-bottom: 4px;
+        }
+
+        .summary-item .value {
+            font-size: 22px;
+            font-weight: 700;
+        }
+
+        /* ===== Save Status ===== */
+        #saveStatus {
+            font-size: 12px;
+            color: var(--pwc-green);
+            margin-left: 8px;
+        }
+
+        /* ===== Scrollbar ===== */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--pwc-gray-3); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--pwc-gray-2); }
+    </style>
+</head>
+<body>
+
+    <!-- Top Bar -->
+    <div class="top-bar">
+        <div class="logo">
+            <div class="logo-text"><span>p</span><span>w</span><span>c</span></div>
+        </div>
+        <div class="page-title">知识库AI回答评估工具</div>
+    </div>
+    <div class="accent-stripe"></div>
+
+    <div class="container">
+
+        <!-- Prompt Card - Always visible -->
+        <div class="card" id="promptCard">
+            <div class="card-title">评分提示词配置</div>
+            <div class="prompt-header">
+                <label>提示词模板</label>
+                <div class="prompt-actions">
+                    <button class="btn btn-sm btn-primary" id="savePromptBtn">保存提示词</button>
+                    <button class="btn btn-sm btn-secondary" id="resetPromptBtn">恢复默认</button>
+                </div>
+            </div>
+            <small class="prompt-hint">
+                可用变量：<code>{question}</code> 问题、<code>{reference_answer}</code> 参考答案、<code>{ai_answer}</code> AI回答 &nbsp;|&nbsp; 编辑后自动保存，处理时自动使用当前内容
+            </small>
+            <textarea id="scoringPrompt" rows="10" placeholder="加载默认提示词中..."></textarea>
+        </div>
+
+        <!-- Upload Card -->
+        <div class="card">
+            <div class="card-title">上传文件</div>
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">
+                    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#D04A02" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                </div>
+                <div class="upload-text">
+                    <strong>点击上传</strong> 或拖拽 Excel 文件到此处
+                    <br>
+                    <small>支持 .xlsx 格式 | 问题从B列读取 | 建议答案从E列读取</small>
+                </div>
+                <input type="file" id="fileInput" accept=".xlsx,.xls">
+            </div>
+
+            <div class="file-info" id="fileInfo">
+                <h3>文件信息</h3>
+                <p><strong>文件名：</strong><span id="fileName"></span></p>
+                <p><strong>问题数量：</strong><span id="questionCount"></span> 个</p>
+                <p><strong>含参考答案：</strong><span id="hasReference"></span></p>
+                <div class="questions-preview" id="questionsPreview"></div>
+            </div>
+        </div>
+
+        <!-- Settings Card -->
+        <div class="card" id="optionsArea" style="display:none;">
+            <div class="card-title">处理配置</div>
+
+            <div class="options">
+                <label>
+                    <input type="checkbox" id="enableScoring">
+                    <span>启用语义对比打分（需要E列有建议答案）</span>
+                </label>
+
+                <div class="thread-options">
+                    <span>并发线程数：</span>
+                    <label><input type="radio" name="threadCount" value="2" checked> 2</label>
+                    <label><input type="radio" name="threadCount" value="4"> 4</label>
+                    <label><input type="radio" name="threadCount" value="6"> 6</label>
+                    <label><input type="radio" name="threadCount" value="8"> 8</label>
+                </div>
+            </div>
+
+            <div class="error-message" id="errorMessage"></div>
+
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill">0%</div>
+                </div>
+                <div class="progress-text" id="progressText">正在处理中...</div>
+            </div>
+
+            <div class="buttons">
+                <button class="btn btn-primary" id="processBtn" disabled>开始处理</button>
+            </div>
+        </div>
+
+        <!-- Results Card -->
+        <div class="card" id="resultsCard" style="display:none;">
+            <div class="card-title">处理结果</div>
+            <div class="results-layout" id="resultsLayout">
+                <div class="results-sidebar" id="resultsSidebar"></div>
+                <div class="results-detail" id="resultsDetail">
+                    <div class="detail-empty">点击左侧问题查看详情</div>
+                </div>
+            </div>
+
+            <div class="summary-stats" id="summaryStats">
+                <div class="summary-title">整体评估统计</div>
+                <div class="summary-grid" id="summaryGrid"></div>
+            </div>
+
+            <div class="download-section" id="downloadSection">
+                <button class="btn btn-success" id="downloadExcelBtn">下载 Excel</button>
+            </div>
+        </div>
+
+    </div>
+
+    <div class="footer">&copy; 2026 PwC. All rights reserved.</div>
+
+    <script>
+        let uploadedFilename = null;
+        let outputXlsx = null;
+        let outputHtmlFile = null;
+
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const errorMessage = document.getElementById('errorMessage');
+        const processBtn = document.getElementById('processBtn');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressFill = document.getElementById('progressFill');
+        const progressText = document.getElementById('progressText');
+        const resultsContainer = document.getElementById('resultsCard');
+        const resultsSidebar = document.getElementById('resultsSidebar');
+        const resultsDetail = document.getElementById('resultsDetail');
+        const downloadSection = document.getElementById('downloadSection');
+        const downloadExcelBtn = document.getElementById('downloadExcelBtn');
+        const summaryStats = document.getElementById('summaryStats');
+        const summaryGrid = document.getElementById('summaryGrid');
+        const optionsArea = document.getElementById('optionsArea');
+        const enableScoring = document.getElementById('enableScoring');
+        const scoringPromptEl = document.getElementById('scoringPrompt');
+        const resetPromptBtn = document.getElementById('resetPromptBtn');
+        const savePromptBtn = document.getElementById('savePromptBtn');
+
+        // 默认评分提示词（从后端加载）
+        let defaultPromptText = '';
+
+        // 页面加载时：先获取默认值，再加载已保存的提示词
+        fetch('/default_prompt')
+            .then(r => r.json())
+            .then(data => { defaultPromptText = data.prompt; })
+            .then(() => fetch('/saved_prompt'))
+            .then(r => r.json())
+            .then(data => { scoringPromptEl.value = data.prompt; })
+            .catch(() => {
+                scoringPromptEl.value = defaultPromptText || '加载提示词失败，请刷新页面重试';
+            });
+
+        // 评分开关
+        enableScoring.addEventListener('change', () => {});
+
+        // 恢复默认
+        resetPromptBtn.addEventListener('click', () => {
+            scoringPromptEl.value = defaultPromptText;
+            savePromptToServer(defaultPromptText);
+        });
+
+        // 手动保存
+        savePromptBtn.addEventListener('click', () => {
+            savePromptToServer(scoringPromptEl.value);
+        });
+
+        // 自动保存（防抖）
+        let saveTimer = null;
+        scoringPromptEl.addEventListener('input', () => {
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(() => {
+                savePromptToServer(scoringPromptEl.value);
+            }, 800);
+        });
+
+        function showSaveStatus(msg) {
+            const existing = document.getElementById('saveStatus');
+            if (existing) existing.remove();
+            const span = document.createElement('span');
+            span.id = 'saveStatus';
+            span.textContent = msg;
+            savePromptBtn.parentElement.appendChild(span);
+            setTimeout(() => span.remove(), 2000);
+        }
+
+        function savePromptToServer(promptText) {
+            if (!promptText.trim()) return;
+            fetch('/save_prompt', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt: promptText })
+            })
+            .then(r => r.json())
+            .then(data => { if (data.success) showSaveStatus('已保存'); })
+            .catch(() => {});
+        }
+
+        // Upload
+        uploadArea.addEventListener('click', () => fileInput.click());
+        uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('dragover'); });
+        uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', (e) => { if (e.target.files.length > 0) handleFile(e.target.files[0]); });
+
+        function handleFile(file) {
+            hideError();
+            hideResults();
+            const formData = new FormData();
+            formData.append('file', file);
+            fetch('/upload', { method: 'POST', body: formData })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) { showError(data.error); }
+                else {
+                    uploadedFilename = data.filename;
+                    showFileInfo(data);
+                    processBtn.disabled = false;
+                    optionsArea.style.display = 'block';
+                }
+            })
+            .catch(err => showError('上传失败: ' + err.message));
+        }
+
+        function showFileInfo(data) {
+            document.getElementById('fileName').textContent = data.filename;
+            document.getElementById('questionCount').textContent = data.question_count;
+            const hasRef = data.questions.some(q => q.has_reference);
+            document.getElementById('hasReference').textContent = hasRef ? '是' : '否';
+            if (!hasRef) { enableScoring.checked = false; enableScoring.disabled = true; }
+            else { enableScoring.disabled = false; }
+            const preview = document.getElementById('questionsPreview');
+            preview.innerHTML = data.questions.map(q =>
+                `<div class="question-item"><strong>行${q.row}:</strong> ${escapeHtml(q.question.substring(0, 80))}${q.question.length > 80 ? '...' : ''}${q.has_reference ? ' <span style="color:#2A9D8F;">[有参考答案]</span>' : ''}</div>`
+            ).join('');
+            fileInfo.classList.add('show');
+        }
+
+        function showError(msg) { errorMessage.textContent = msg; errorMessage.classList.add('show'); }
+        function hideError() { errorMessage.classList.remove('show'); }
+        function hideResults() {
+            resultsContainer.style.display = 'none';
+            downloadSection.classList.remove('show');
+            summaryStats.classList.remove('show');
+            summaryGrid.innerHTML = '';
+            resultsSidebar.innerHTML = '';
+            resultsDetail.innerHTML = '<div class="detail-empty">点击左侧问题查看详情</div>';
+            allResults = [];
+        }
+
+        function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+
+        // SSE
+        processBtn.addEventListener('click', () => {
+            if (!uploadedFilename) return;
+            processBtn.disabled = true;
+            processBtn.innerHTML = '<span class="loading-spinner"></span>处理中...';
+            progressContainer.classList.add('show');
+            progressFill.style.width = '0%';
+            progressFill.textContent = '0%';
+            progressText.textContent = '正在处理中...';
+            hideResults();
+            hideError();
+            resultsContainer.style.display = 'block';
+
+            const scoringEnabled = enableScoring.checked;
+            const threadCount = document.querySelector('input[name="threadCount"]:checked').value;
+            const requestBody = { filename: uploadedFilename, enable_scoring: scoringEnabled, thread_count: parseInt(threadCount) };
+            if (scoringEnabled) requestBody.scoring_prompt = scoringPromptEl.value;
+
+            let completedCount = 0;
+
+            fetch('/process', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) })
+            .then(response => {
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                function handleEvent(data) {
+                    if (data.type === 'progress') {
+                        completedCount = data.current;
+                        progressFill.style.width = data.percentage + '%';
+                        progressFill.textContent = data.percentage + '%';
+                        progressText.textContent = `正在处理第 ${data.current}/${data.total} 题 (${threadCount}线程并发)...`;
+                        addResult(data.result, scoringEnabled);
+                    } else if (data.type === 'complete') {
+                        outputXlsx = data.output_filename;
+                        outputHtmlFile = data.output_filename_html;
+                        progressFill.style.width = '100%';
+                        progressFill.textContent = '100%';
+                        progressText.textContent = '处理完成';
+                        downloadSection.classList.add('show');
+                        showSummary();
+                        finishProcess();
+                        // 自动选中第一条
+                        const firstItem = resultsSidebar.querySelector('.sidebar-item');
+                        if (firstItem) firstItem.click();
+                    } else if (data.type === 'error') {
+                        showError(data.message);
+                        finishProcess();
+                    }
+                }
+
+                function processBuffer() {
+                    while (true) {
+                        const idx = buffer.indexOf('\n\n');
+                        if (idx === -1) break;
+                        const block = buffer.substring(0, idx);
+                        buffer = buffer.substring(idx + 2);
+                        for (const line of block.split('\n')) {
+                            if (line.startsWith('data: ')) { try { handleEvent(JSON.parse(line.substring(6))); } catch(e) {} }
+                        }
+                    }
+                }
+
+                function read() {
+                    reader.read().then(({ done, value }) => {
+                        if (done) { processBuffer(); finishProcess(); return; }
+                        buffer += decoder.decode(value, { stream: true });
+                        processBuffer();
+                        read();
+                    });
+                }
+                read();
+            }).catch(err => { showError('处理失败: ' + err.message); finishProcess(); });
+        });
+
+        function finishProcess() {
+            processBtn.disabled = false;
+            processBtn.innerHTML = '开始处理';
+            progressContainer.classList.remove('show');
+        }
+
+        let allResults = [];
+
+        function scoreClass(val, max) {
+            if (max === undefined) max = 20;
+            const ratio = val / max;
+            if (ratio >= 0.8) return 'high';
+            if (ratio >= 0.5) return 'mid';
+            return 'low';
+        }
+
+        function addResult(r, hasScoring) {
+            allResults.push({ ...r, hasScoring });
+
+            const idx = allResults.length;
+            const total = r.scores && r.scores.success ? r.scores.total_score : null;
+            let badgeHtml = '';
+            if (total !== null) {
+                const cls = total >= 80 ? 'high' : total >= 50 ? 'mid' : 'low';
+                badgeHtml = `<span class="sidebar-score-badge ${cls}">${total}/100</span>`;
+            } else if (!r.success) {
+                badgeHtml = `<span class="sidebar-score-badge fail">失败</span>`;
+            }
+
+            const div = document.createElement('div');
+            div.className = `sidebar-item ${r.success ? '' : 'error'}`;
+            div.dataset.idx = idx - 1;
+            div.innerHTML = `
+                <div class="sidebar-num">第 ${idx} 题</div>
+                <div class="sidebar-question">${escapeHtml(r.question.substring(0, 60))}${r.question.length > 60 ? '...' : ''}</div>
+                ${badgeHtml}
+            `;
+            div.addEventListener('click', () => showDetail(parseInt(div.dataset.idx)));
+            resultsSidebar.appendChild(div);
+        }
+
+        function showDetail(idx) {
+            const r = allResults[idx];
+            if (!r) return;
+
+            // highlight sidebar
+            resultsSidebar.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+            const activeEl = resultsSidebar.querySelector(`.sidebar-item[data-idx="${idx}"]`);
+            if (activeEl) activeEl.classList.add('active');
+
+            const scoresHtml = r.hasScoring ? buildScoresHtml(r.scores) : '';
+
+            resultsDetail.innerHTML = `
+                <div class="detail-content">
+                    <div class="detail-section">
+                        <div class="detail-section-header"><span class="dot"></span>问题</div>
+                        <div class="detail-section-body">${escapeHtml(r.question)}</div>
+                    </div>
+                    <div class="detail-section">
+                        <div class="detail-section-header"><span class="dot"></span>AI回答</div>
+                        <div class="detail-section-body">${escapeHtml(r.answer)}</div>
+                    </div>
+                    ${r.reference_answer ? `<div class="detail-section">
+                        <div class="detail-section-header"><span class="dot"></span>建议答案</div>
+                        <div class="detail-section-body">${escapeHtml(r.reference_answer)}</div>
+                    </div>` : ''}
+                    ${scoresHtml}
+                </div>
+            `;
+            resultsDetail.scrollTop = 0;
+        }
+
+        function buildScoresHtml(scores) {
+            if (!scores) return '';
+            if (!scores.success) {
+                const msg = scores.accuracy_reason || '评分失败';
+                return `<div class="detail-section">
+                    <div class="detail-section-header" style="color:#CB333B;"><span class="dot" style="background:#CB333B;"></span>评分失败</div>
+                    <div class="detail-section-body" style="color:#CB333B;">${escapeHtml(msg)}</div>
+                </div>`;
+            }
+            const items = [
+                { label: '答案准确性(60)', score: scores.accuracy_score, max: 60, reason: scores.accuracy_reason },
+                { label: '法条援引度(20)', score: scores.citation_score, max: 20, reason: scores.citation_reason },
+                { label: '总结完整度(20)', score: scores.summary_score, max: 20, reason: scores.summary_reason },
+            ];
+            const cardsHtml = items.map(it => `
+                <div class="detail-score-card">
+                    <div class="label">${it.label}</div>
+                    <div class="value ${scoreClass(it.score, it.max)}">${it.score}/${it.max}</div>
+                    <div class="reason">${escapeHtml(it.reason || '')}</div>
+                </div>
+            `).join('');
+
+            const total = scores.total_score;
+            const totalCls = total >= 80 ? 'high' : total >= 50 ? '#D04A02' : 'low';
+            return `<div class="detail-section">
+                <div class="detail-section-header"><span class="dot"></span>评分详情</div>
+                <div class="detail-scores">
+                    <div class="detail-scores-grid">${cardsHtml}</div>
+                    <div class="detail-total-bar">
+                        <span class="label">总分</span>
+                        <span class="value" style="color:${totalCls === 'high' ? '#2A9D8F' : totalCls === 'low' ? '#CB333B' : '#D04A02'}">${total}/100</span>
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        function showSummary() {
+            const scored = allResults.filter(r => r.scores && r.scores.success);
+            if (scored.length === 0) return;
+
+            const n = scored.length;
+            const avg = (key) => (scored.reduce((s, r) => s + (r.scores[key] || 0), 0) / n).toFixed(1);
+            const avgTotal = avg('total_score');
+            const avgAccuracy = avg('accuracy_score');
+            const avgCitation = avg('citation_score');
+            const avgSummary = avg('summary_score');
+
+            const color = v => v >= 80 ? '#2A9D8F' : v >= 50 ? '#D04A02' : '#CB333B';
+            const pct = v => (v / 100 * 100).toFixed(0);
+            const pctA = v => (v / 60 * 100).toFixed(0);
+            const pct20 = v => (v / 20 * 100).toFixed(0);
+
+            summaryGrid.innerHTML = `
+                <div class="summary-item">
+                    <div class="label">总题数</div>
+                    <div class="value" style="color:white;">${allResults.length}</div>
+                    <div class="label" style="margin-top:2px;">已评分 ${n} 题</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">平均总分</div>
+                    <div class="value" style="color:${color(parseFloat(avgTotal))};">${avgTotal}</div>
+                    <div class="label" style="margin-top:2px;">/ 100</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">答案准确性</div>
+                    <div class="value" style="color:${color(parseFloat(pctA(avgAccuracy)))};">${avgAccuracy}</div>
+                    <div class="label" style="margin-top:2px;">/ 60</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">法条援引度</div>
+                    <div class="value" style="color:${color(parseFloat(pct20(avgCitation)))};">${avgCitation}</div>
+                    <div class="label" style="margin-top:2px;">/ 20</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">总结完整度</div>
+                    <div class="value" style="color:${color(parseFloat(pct20(avgSummary)))};">${avgSummary}</div>
+                    <div class="label" style="margin-top:2px;">/ 20</div>
+                </div>
+            `;
+            summaryStats.classList.add('show');
+        }
+
+        downloadExcelBtn.addEventListener('click', () => {
+            if (outputXlsx) window.location.href = '/download/' + outputXlsx;
+        });
+    </script>
+</body>
+</html>
