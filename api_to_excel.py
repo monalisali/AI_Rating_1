@@ -15,22 +15,26 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 
 
-def request_api(message: str, session_id: str = "") -> tuple:
+def request_api(message: str, session_id: str = "", custom_system_prompt: str = "") -> tuple:
     """
     请求API接口并返回content值和session_id
 
     Args:
         message: 用户问题
         session_id: 会话ID（可选）
+        custom_system_prompt: 自定义系统提示词（可选）
 
     Returns:
         (api_response, session_id) 元组
     """
     url = 'https://ai.tech.tax.asia.pwcinternal.com:5007/api/chat-stream'
-    data = json.dumps({
+    payload = {
         'message': message,
         'session_id': session_id
-    }).encode('utf-8')
+    }
+    if custom_system_prompt:
+        payload['custom_system_prompt'] = custom_system_prompt
+    data = json.dumps(payload).encode('utf-8')
 
     req = urllib.request.Request(
         url,
