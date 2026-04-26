@@ -52,6 +52,17 @@ ALLOWED_EXTENSIONS = {'xlsx', 'xls'}
 
 # Prompt.md 路径
 PROMPT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Prompt.md')
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+
+
+def get_config(key, default=None):
+    """从config.json读取配置（每次调用重新读取，支持运行时修改）"""
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        return cfg.get(key, default)
+    except Exception:
+        return default
 
 
 def load_system_prompt():
@@ -84,10 +95,16 @@ def request_api(message: str, session_id: str = "", custom_system_prompt: str = 
     payload = {
         'message': message,
         'session_id': session_id,
-        'model': 'glm-5.1'
+        'model': get_config('model', 'glm-5.1')
     }
     if custom_system_prompt:
         payload['custom_system_prompt'] = custom_system_prompt
+    llm_api_key = get_config('llm_api_key', '')
+    llm_base_url = get_config('llm_base_url', '')
+    if llm_api_key:
+        payload['llm_api_key'] = llm_api_key
+    if llm_base_url:
+        payload['llm_base_url'] = llm_base_url
     data = json.dumps(payload).encode('utf-8')
 
     req = urllib.request.Request(url, data=data, headers={
@@ -178,23 +195,41 @@ def chat_with_confirmation(question: str, max_rounds: int = 8, system_prompt: st
     return content
 
 
-def request_scoring_api(prompt: str) -> str:
-    """请求内网AI评分API"""
-    data = json.dumps({
-        'model': SCORING_MODEL,
-        'messages': [{'role': 'user', 'content': prompt}]
-    }).encode('utf-8')
+def request_scoring_api(prompt: str, timeout: int = 300) -> str:
+    """请求内网AI评分API，带线程超时保护防止卡死"""
+    import threading
+    result_holder = [None, None]  # [result, error]
 
-    req = urllib.request.Request(SCORING_API_URL, data=data, headers={
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {SCORING_API_KEY}'
-    })
+    def _call():
+        try:
+            data = json.dumps({
+                'model': SCORING_MODEL,
+                'messages': [{'role': 'user', 'content': prompt}]
+            }).encode('utf-8')
 
-    with urllib.request.urlopen(req, timeout=300) as response:
-        result = json.loads(response.read().decode('utf-8'))
-        if 'choices' not in result or not result['choices']:
-            raise ValueError(f"API返回格式异常: {json.dumps(result, ensure_ascii=False)[:300]}")
-        return result['choices'][0]['message']['content']
+            req = urllib.request.Request(SCORING_API_URL, data=data, headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {SCORING_API_KEY}'
+            })
+
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                resp = json.loads(response.read().decode('utf-8'))
+                if 'choices' not in resp or not resp['choices']:
+                    result_holder[1] = ValueError(f"API返回格式异常: {json.dumps(resp, ensure_ascii=False)[:300]}")
+                    return
+                result_holder[0] = resp['choices'][0]['message']['content']
+        except Exception as e:
+            result_holder[1] = e
+
+    t = threading.Thread(target=_call, daemon=True)
+    t.start()
+    t.join(timeout=timeout + 30)
+
+    if t.is_alive():
+        raise TimeoutError(f"评分API调用超过{timeout + 30}秒，已强制终止")
+    if result_holder[1] is not None:
+        raise result_holder[1]
+    return result_holder[0]
 
 
 # 默认评分提示词模板（可通过前端覆盖）
@@ -247,13 +282,15 @@ DEFAULT_SCORING_PROMPT = """请作为一名专业的税务领域评估专家，�
 }}"""
 
 
-def optimize_prompt(current_prompt: str, results_with_scores: list, attempt: int = 1) -> str:
+def optimize_prompt(current_prompt: str, results_with_scores: list, attempt: int = 1, optimize_template: str = None, context_info: str = "") -> str:
     """
     根据评分结果，定向优化系统提示词
 
     Args:
         current_prompt: 当前使用的系统提示词
         results_with_scores: 列表，每项包含 question, answer, reference_answer, scores
+        attempt: 第几次尝试
+        optimize_template: 外层优化过的优化指令模板（None则用默认）
 
     Returns:
         优化后的新系统提示词
@@ -303,44 +340,179 @@ def optimize_prompt(current_prompt: str, results_with_scores: list, attempt: int
         )
 
     focus_text = '\n'.join(focus_parts) if focus_parts else "- 整体评分偏低，请全面检查并优化系统提示词中的薄弱环节。"
+    details_text = '\n'.join(details)
 
-    optimize_instruction = f"""你是一个专业的提示词优化专家。当前有一个用于税务法规知识库AI助手的系统提示词，但使用该提示词后AI回答的评分不够理想。
+    # 使用外层优化的模板或默认模板
+    if optimize_template:
+        optimize_instruction = optimize_template.format(
+            current_prompt=current_prompt,
+            details=details_text,
+            focus_text=focus_text
+        )
+    else:
+        optimize_instruction = f"""你是一个专业的提示词优化专家。当前有一个用于税务法规知识库AI助手的系统提示词，但使用该提示词后AI回答的评分不够理想。
 
-请根据以下评分数据中体现的具体薄弱维度，**只针对低分维度相关部分进行定向修改**，其他部分必须原样保留不得改动。
+请分析评分数据中低分维度的具体原因，**对现有规则进行精准修改**，而非堆砌新规则。
 
 【当前系统提示词】
 {current_prompt}
 
 【各题评分详情】
-{chr(10).join(details)}
+{details_text}
 
 【需要优化的维度】
 {focus_text}
 
-【优化规则】
-1. 只修改与低分维度直接相关的步骤或段落，其他所有内容必须原样保留
-2. 不要重构、不要重写、不要删除已有的有效规则
-3. 修改时要具体、可操作，添加明确的指令而非模糊的建议
-4. 输出完整的系统提示词（包含未修改的部分），不要省略任何部分
-5. 不要输出任何解释说明，只输出新的系统提示词本身"""
+【修改原则】
+1. **精准修改**：根据评分详情中的扣分原因，找到导致该问题的具体规则并针对性修改
+2. **允许补充和新增**：可以在现有段落内补充约束，也可以新增必要的步骤或章节，但新增内容要精炼、直接解决扣分问题，不要堆砌冗长的规则列表
+3. **未修改部分必须原样保留**：与低分维度无关的所有内容不得有任何改动
+4. 不要输出任何解释说明，只输出新的系统提示词本身
+"""
 
     try:
         new_prompt = request_scoring_api(optimize_instruction)
-        logger.info(f"[optimize_prompt] 优化完成，原始长度={len(current_prompt)}, 新长度={len(new_prompt)}")
-        # 追加保存到当次运行的优化提示词文件
+        max_len = int(len(current_prompt) * 1.5)
+        # 先保存到文件（无论是否被丢弃）
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         prompt_file = os.path.join(LOG_DIR, f"optimized_prompt_{ts[:8]}.txt")
         with open(prompt_file, 'a', encoding='utf-8') as f:
             f.write(f"\n{'='*60}\n")
             f.write(f"===== 第{attempt}次优化生成的提示词 ({ts}) =====\n")
+            if context_info:
+                f.write(f"{context_info}\n")
             f.write(f"{'='*60}\n\n")
             f.write(new_prompt)
             f.write("\n")
-        logger.info(f"[optimize_prompt] 优化后提示词已追加到: {prompt_file}")
+        if len(new_prompt) > max_len:
+            logger.warning(f"[optimize_prompt] 优化后提示词过长（{len(new_prompt)} > {max_len}），已记录但丢弃，保留原始提示词")
+            return current_prompt
+        logger.info(f"[optimize_prompt] 优化完成，原始长度={len(current_prompt)}, 新长度={len(new_prompt)}，已保存到: {prompt_file}")
         return new_prompt
     except Exception as e:
         logger.error(f"提示词优化失败: {e}")
         return current_prompt
+
+
+def _build_score_details(results_with_scores):
+    """构建评分详情文本（不截取，用于内层优化）"""
+    details = []
+    for i, r in enumerate(results_with_scores):
+        scores = r.get('scores', {})
+        detail = f"问题{i+1}: {r['question']}\n"
+        detail += f"AI回答: {r['answer']}\n"
+        if r.get('reference_answer'):
+            detail += f"参考答案: {r['reference_answer']}\n"
+        if scores and scores.get('success'):
+            detail += f"总分: {scores['total_score']}/100\n"
+            detail += f"准确性: {scores['accuracy_score']}/60 - {scores['accuracy_reason']}\n"
+            detail += f"法条援引: {scores['citation_score']}/20 - {scores['citation_reason']}\n"
+            detail += f"总结完整度: {scores['summary_score']}/20 - {scores['summary_reason']}\n"
+        else:
+            detail += "评分失败\n"
+        details.append(detail)
+    return '\n'.join(details)
+
+
+def _build_focus_text(results_with_scores):
+    """根据评分结果判断低分维度"""
+    low_dims = {'accuracy': False, 'citation': False, 'summary': False}
+    for r in results_with_scores:
+        scores = r.get('scores', {})
+        if scores and scores.get('success'):
+            if scores['accuracy_score'] < 48:
+                low_dims['accuracy'] = True
+            if scores['citation_score'] < 16:
+                low_dims['citation'] = True
+            if scores['summary_score'] < 16:
+                low_dims['summary'] = True
+
+    focus_parts = []
+    if low_dims['accuracy']:
+        focus_parts.append("- 【准确性偏低】重点优化搜索策略（步骤4和4.6），确保AI搜索更全面、不遗漏关键法规，"
+                           "加强法规内容与问题的关联分析，确保核心结论准确。")
+    if low_dims['citation']:
+        focus_parts.append("- 【法条援引偏低】重点优化引用列表与校验部分（步骤6），确保AI在回答中实际引用和讨论每条法规，"
+                           "引用列表与正文引用完全对应。")
+    if low_dims['summary']:
+        focus_parts.append("- 【总结完整度偏低】重点优化核心发现和总结的生成要求（步骤5），确保AI的总结覆盖问题的所有关键方面，"
+                           "不遗漏重要要点。")
+    return '\n'.join(focus_parts) if focus_parts else "- 整体评分偏低，请全面检查并优化系统提示词中的薄弱环节。"
+
+
+def optimize_optimization_method(optimize_template, all_attempt_logs):
+    """
+    外层循环：优化"优化方法"本身
+    分析多轮优化仍低分的原因，让AI生成新的优化指令模板
+    """
+    logger.info("[optimize_method] 开始优化优化方法...")
+
+    # 每次尝试的评分详情（AI回答和参考答案截取前500字，防止payload过大）
+    TRUNCATE_LEN = 500
+    all_details = []
+    for log_entry in all_attempt_logs:
+        detail = f"第{log_entry['attempt']}次尝试: 平均总分={log_entry['avg_total']:.1f}\n"
+        for i, r in enumerate(log_entry['results']):
+            scores = r.get('scores', {})
+            detail += f"问题{i+1}: {r['question']}\n"
+            detail += f"AI回答: {r['answer'][:TRUNCATE_LEN]}{'...(截断)' if len(r['answer']) > TRUNCATE_LEN else ''}\n"
+            if r.get('reference_answer'):
+                ref = r['reference_answer']
+                detail += f"参考答案: {ref[:TRUNCATE_LEN]}{'...(截断)' if len(ref) > TRUNCATE_LEN else ''}\n"
+            if scores and scores.get('success'):
+                detail += f"总分: {scores['total_score']}/100\n"
+                detail += f"准确性: {scores['accuracy_score']}/60 - {scores['accuracy_reason']}\n"
+                detail += f"法条援引: {scores['citation_score']}/20 - {scores['citation_reason']}\n"
+                detail += f"总结完整度: {scores['summary_score']}/20 - {scores['summary_reason']}\n"
+            else:
+                detail += "评分失败\n"
+        all_details.append(detail)
+    full_history = '\n'.join(all_details)
+
+    last_results = all_attempt_logs[-1]['results']
+    last_focus = _build_focus_text(last_results)
+    score_threshold = get_config('score_threshold', 80)
+
+    meta_instruction = f"""你是一个元优化专家。当前有一个用于优化"税务法规知识库AI助手系统提示词"的优化指令，但经过多轮使用后，评分始终无法达到{score_threshold}分。
+
+请分析当前的优化指令存在什么问题，然后输出一个改进后的完整优化指令。
+
+【当前使用的优化指令】
+{optimize_template}
+
+【所有尝试的完整评分详情】（共{len(all_attempt_logs)}次尝试，均未达标）
+{full_history}
+
+【低分维度】
+{last_focus}
+
+【元优化要求】
+1. 分析为什么当前的优化策略反复尝试仍无法提升评分（是优化方向不对？约束不够？还是遗漏了关键因素？）
+2. 生成一个新的优化指令，要求：
+   - 保留当前指令中有效的部分
+   - 修改或增加能解决反复低分问题的策略
+   - 指令必须包含占位符 {{current_prompt}}、{{details}}、{{focus_text}}（用双花括号）
+3. 输出完整的优化指令模板，不要省略
+4. 不要输出任何解释说明，只输出新的优化指令模板本身"""
+
+    try:
+        logger.info(f"[optimize_method] 发送优化请求，内容长度={len(meta_instruction)} 字符，预计需要较长时间...")
+        new_template = request_scoring_api(meta_instruction)
+        logger.info(f"[optimize_method] 优化方法更新完成，原始长度={len(optimize_template)}, 新长度={len(new_template)}")
+        # 保存优化方法到文件
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        method_file = os.path.join(LOG_DIR, f"optimized_method_{ts[:8]}.txt")
+        with open(method_file, 'a', encoding='utf-8') as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"===== 新的优化方法 ({ts}) =====\n")
+            f.write(f"{'='*60}\n\n")
+            f.write(new_template)
+            f.write("\n")
+        logger.info(f"[optimize_method] 新优化方法已保存到: {method_file}")
+        return new_template
+    except Exception as e:
+        logger.error(f"优化方法更新失败: {e}")
+        return optimize_template
 
 
 def score_answer(question: str, ai_answer: str, reference_answer: str, scoring_prompt_template: str = None) -> dict:
@@ -639,18 +811,27 @@ def upload_file():
 
 
 def process_single_question(row_num, question, reference_answer, enable_scoring, scoring_prompt_template=None, system_prompt="", existing_answer=""):
-    """处理单个问题：获取AI回答 + 评分（如果有现有AI回答则跳过API调用）"""
+    """处理单个问题：获取AI回答 + 评分。如果回答为空则自动重试"""
     try:
         if existing_answer:
             answer = existing_answer
         else:
-            answer = chat_with_confirmation(question, system_prompt=system_prompt)
+            max_retries = 2
+            for retry in range(max_retries + 1):
+                answer = chat_with_confirmation(question, system_prompt=system_prompt)
+                if answer.strip():
+                    break
+                if retry < max_retries:
+                    logger.info(f"[process] row={row_num} 回答为空，重试第{retry+1}次...")
 
         scores = None
         if enable_scoring and reference_answer:
             logger.info(f"[process] row={row_num} 开始评分...")
             scores = score_answer(question, answer, reference_answer, scoring_prompt_template)
-            logger.info(f"[process] row={row_num} 评分完成 → 总分={scores.get('total_score', '?')}")
+            if scores:
+                logger.info(f"[process] row={row_num} 评分完成 → 总分={scores.get('total_score', '?')}")
+            else:
+                logger.warning(f"[process] row={row_num} 评分返回None")
 
         return {
             'row': row_num,
@@ -672,15 +853,17 @@ def process_single_question(row_num, question, reference_answer, enable_scoring,
         }
 
 
-def _log_attempt_summary(attempt, system_prompt, results):
-    """记录单次尝试的日志：提示词摘要 + 每题评分 + 整体统计，返回平均总分"""
-    logger.info(f"===== 第{attempt}次尝试 =====")
-    logger.info(f"系统提示词(前200字): {system_prompt[:200]}")
+def _log_attempt_summary(attempt, results, suffix="", context=""):
+    """记录单次尝试的日志：级次信息 + 每题评分 + 整体统计，返回平均总分"""
+    header = f"===== 第{attempt}次尝试{suffix}"
+    if context:
+        header += f" [{context}]"
+    logger.info(header)
 
-    scored = [r for r in results if r.get('scores', {}).get('success')]
+    scored = [r for r in results if r.get('scores') and r['scores'].get('success')]
     for r in results:
-        scores = r.get('scores', {})
-        if scores and scores.get('success'):
+        scores = r.get('scores') or {}
+        if scores.get('success'):
             logger.info(
                 f"  题目(row={r['row']}): 总分={scores['total_score']}, "
                 f"准确性={scores['accuracy_score']}/60, "
@@ -708,14 +891,16 @@ def _log_attempt_summary(attempt, system_prompt, results):
 
 @app.route('/process', methods=['POST'])
 def process_questions():
-    """SSE流式处理接口，支持自动优化提示词重试"""
+    """SSE流式处理接口，支持两层自动优化（内层优化提示词，外层优化优化方法）"""
     data = request.json
     filename = data.get('filename')
     enable_scoring = data.get('enable_scoring', False)
     scoring_prompt_template = data.get('scoring_prompt', None)
     thread_count = data.get('thread_count', 2)
     thread_count = max(1, min(8, int(thread_count)))
-    max_attempts = max(1, min(20, int(data.get('max_attempts', 20))))
+    max_attempts = max(1, min(20, int(data.get('max_attempts', get_config('max_attempts', 10)))))
+    max_optimize_rounds = max(1, min(5, int(data.get('max_optimize_rounds', get_config('max_optimize_rounds', 3)))))
+    score_threshold = get_config('score_threshold', 80)
 
     def sse_error(msg):
         def gen():
@@ -733,105 +918,173 @@ def process_questions():
     questions = read_questions_from_excel(filepath)
     total = len(questions)
     system_prompt = load_system_prompt()
-    logger.info(f"========== 开始处理 {total}题 | {thread_count}线程 | 评分{'开' if enable_scoring else '关'} | 最多{max_attempts}次尝试 ==========")
-    has_existing = any(ea for _, _, ea, _ in questions)
+    optimize_template = None  # 使用内层默认的优化指令
+    logger.info(f"========== 开始处理 {total}题 | {thread_count}线程 | 评分{'开' if enable_scoring else '关'} | 内层{max_attempts}次 | 外层{max_optimize_rounds}轮 | 阈值{score_threshold} ==========")
 
     def generate():
-        nonlocal system_prompt
+        nonlocal system_prompt, optimize_template
 
-        all_attempt_logs = []
-        results = []
+        global_attempt = 0
+        all_round_logs = []
 
-        for attempt in range(1, max_attempts + 1):
-            try:
-                if attempt == 1:
-                    logger.info(f"===== 第{attempt}次尝试（使用{'现有AI回答' if has_existing else 'API调用'}）=====")
-                else:
-                    logger.info(f"===== 第{attempt}次尝试（使用优化后提示词，重新调API）=====")
+        for optimize_round in range(1, max_optimize_rounds + 1):
+            logger.info(f"{'#'*60}")
+            logger.info(f"### 外层第{optimize_round}/{max_optimize_rounds}轮（优化方法{'：默认' if optimize_round == 1 else '：已更新'}）###")
+            logger.info(f"{'#'*60}")
 
-                result_queue = queue.Queue()
+            all_attempt_logs = []
+            results = []
+            eval_rounds = max(1, int(get_config('eval_rounds', 3)))
+            current_prompt_avg = 0.0  # 当前提示词版本的多次评估平均分
 
-                # 第1次尝试：如果有现有AI回答则使用（跳过API调用）；第2次及以后：用新提示词重新调API
-                is_first_attempt_with_existing = (attempt == 1 and has_existing)
-
-                def worker(row_num, question, existing_answer, reference_answer):
-                    ea = existing_answer if is_first_attempt_with_existing else ""
-                    result = process_single_question(
-                        row_num, question, reference_answer,
-                        enable_scoring, scoring_prompt_template, system_prompt, ea
-                    )
-                    result_queue.put(result)
-
-                # 提交所有任务
-                with ThreadPoolExecutor(max_workers=thread_count) as executor:
-                    futures = []
-                    for row_num, question, existing_answer, reference_answer in questions:
-                        futures.append(executor.submit(worker, row_num, question, existing_answer, reference_answer))
-
-                    completed = 0
-                    results = []
-                    while completed < total:
-                        result = result_queue.get()
-                        results.append(result)
-                        completed += 1
-
-                        event = {
-                            'type': 'progress',
-                            'current': completed,
-                            'total': total,
-                            'percentage': int(completed / total * 100),
-                            'attempt': attempt,
-                            'max_attempts': max_attempts,
-                            'result': result
-                        }
-                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-
-                results.sort(key=lambda r: r['row'])
-
-                # 记录本次尝试的评分摘要
-                avg_total = _log_attempt_summary(attempt, system_prompt, results)
-                all_attempt_logs.append({
-                    'attempt': attempt,
-                    'system_prompt': system_prompt,
-                    'avg_total': avg_total,
-                    'results': results
-                })
-
-                # 判断是否需要重试
-                need_retry = (
-                    enable_scoring
-                    and attempt < max_attempts
-                    and avg_total < 70
-                    and avg_total >= 0
-                    and len([r for r in results if r.get('scores', {}).get('success')]) > 0
-                )
-
-                if need_retry:
-                    logger.info(f">>> 平均总分 {avg_total:.1f} < 70，触发第{attempt}次提示词优化...")
-                    yield f"data: {json.dumps({'type': 'optimizing', 'attempt': attempt, 'avg_score': round(avg_total, 1)}, ensure_ascii=False)}\n\n"
-
-                    old_prompt = system_prompt
-                    system_prompt = optimize_prompt(system_prompt, results, attempt)
-
-                    if system_prompt != old_prompt:
-                        logger.info(f">>> 提示词已优化，将用新提示词重新获取AI回答并评分")
+            for inner_attempt in range(1, max_attempts + 1):
+                global_attempt += 1
+                try:
+                    if inner_attempt == 1:
+                        logger.info(f"===== 内层第{inner_attempt}次尝试（每个版本评估{eval_rounds}次取平均）=====")
                     else:
-                        logger.info(">>> 提示词未变更，终止重试")
+                        logger.info(f"===== 内层第{inner_attempt}次尝试（使用优化后提示词，评估{eval_rounds}次取平均）=====")
+
+                    # 同一提示词跑 eval_rounds 次，取平均分
+                    round_scores = []
+                    last_results = []
+
+                    for eval_i in range(1, eval_rounds + 1):
+                        if eval_rounds > 1:
+                            logger.info(f"--- 第{eval_i}/{eval_rounds}轮评估 ---")
+
+                        result_queue = queue.Queue()
+
+                        def worker(row_num, question, _existing_answer, reference_answer):
+                            result = process_single_question(
+                                row_num, question, reference_answer,
+                                enable_scoring, scoring_prompt_template, system_prompt
+                            )
+                            result_queue.put(result)
+
+                        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+                            futures = []
+                            for row_num, question, existing_answer, reference_answer in questions:
+                                futures.append(executor.submit(worker, row_num, question, existing_answer, reference_answer))
+
+                            completed = 0
+                            eval_results = []
+                            while completed < total:
+                                result = result_queue.get()
+                                eval_results.append(result)
+                                completed += 1
+
+                                event = {
+                                    'type': 'progress',
+                                    'current': completed,
+                                    'total': total,
+                                    'percentage': int(completed / total * 100),
+                                    'attempt': global_attempt,
+                                    'max_attempts': max_attempts,
+                                    'optimize_round': optimize_round,
+                                    'eval_i': eval_i,
+                                    'eval_rounds': eval_rounds,
+                                    'result': result
+                                }
+                                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+                        eval_results.sort(key=lambda r: r['row'])
+                        eval_avg = _log_attempt_summary(
+                            global_attempt,
+                            eval_results,
+                            suffix=f" [评估{eval_i}/{eval_rounds}]" if eval_rounds > 1 else "",
+                            context=f"外层{optimize_round}轮-内层{inner_attempt}次"
+                        )
+                        round_scores.append(eval_avg)
+                        last_results = eval_results
+
+                    # 取多次评估的平均分
+                    current_prompt_avg = sum(round_scores) / len(round_scores)
+                    if eval_rounds > 1:
+                        logger.info(f">>> 当前提示词{eval_rounds}轮评估平均分: {current_prompt_avg:.1f}（{', '.join(f'{s:.1f}' for s in round_scores)}）")
+
+                    all_attempt_logs.append({
+                        'attempt': global_attempt,
+                        'inner_attempt': inner_attempt,
+                        'system_prompt': system_prompt,
+                        'avg_total': current_prompt_avg,
+                        'eval_scores': round_scores,
+                        'results': last_results
+                    })
+
+                    # 评分达标，直接结束
+                    if current_prompt_avg >= score_threshold:
+                        logger.info(f">>> 平均总分 {current_prompt_avg:.1f} >= {score_threshold}，达标！")
                         break
-                else:
+
+                    need_retry = (
+                        enable_scoring
+                        and inner_attempt < max_attempts
+                        and current_prompt_avg < score_threshold
+                        and current_prompt_avg >= 0
+                        and len([r for r in last_results if r.get('scores') and r['scores'].get('success')]) > 0
+                    )
+
+                    if need_retry:
+                        logger.info(f">>> 平均总分 {current_prompt_avg:.1f} < {score_threshold}，触发第{inner_attempt}次提示词优化...")
+                        yield f"data: {json.dumps({'type': 'optimizing', 'attempt': global_attempt, 'avg_score': round(current_prompt_avg, 1)}, ensure_ascii=False)}\n\n"
+
+                        old_prompt = system_prompt
+                        ctx = f"外层第{optimize_round}轮 | 内层第{inner_attempt}次尝试 | 优化前平均分={current_prompt_avg:.1f} | 原始长度={len(system_prompt)}"
+                        system_prompt = optimize_prompt(system_prompt, last_results, global_attempt, optimize_template, ctx)
+
+                        if system_prompt != old_prompt:
+                            logger.info(f">>> 提示词已优化，将用新提示词重新获取AI回答并评分")
+                        else:
+                            logger.info(">>> 提示词未变更，终止内层循环")
+                            break
+                    else:
+                        break
+
+                except Exception as e:
+                    logger.error(f"第{global_attempt}次尝试异常: {e}")
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'第{global_attempt}次尝试异常: {str(e)}'}, ensure_ascii=False)}\n\n"
+                    if not results:
+                        return
+
+            # 内层循环结束，记录本轮
+            round_best_avg = max((e['avg_total'] for e in all_attempt_logs), default=0)
+            all_round_logs.append({
+                'round': optimize_round,
+                'best_avg': round_best_avg,
+                'attempts': len(all_attempt_logs),
+                'all_attempt_logs': all_attempt_logs
+            })
+
+            # 已达标则不进入外层循环
+            if round_best_avg >= score_threshold:
+                break
+
+            # 外层还有轮次，优化优化方法（带异常保护）
+            if optimize_round < max_optimize_rounds and round_best_avg > 0:
+                try:
+                    logger.info(f"{'#'*60}")
+                    logger.info(f"### 内层{len(all_attempt_logs)}次尝试后仍 < {score_threshold}，开始优化优化方法... ###")
+                    logger.info(f"{'#'*60}")
+                    old_template = optimize_template or ""
+                    optimize_template = optimize_optimization_method(
+                        optimize_template or "默认优化指令", all_attempt_logs
+                    )
+                    if optimize_template == old_template:
+                        logger.info(">>> 优化方法未变更，终止外层循环")
+                        break
+                    # 重置 system_prompt 为最高评分版本
+                    best = max(all_attempt_logs, key=lambda x: x['avg_total'])
+                    system_prompt = best['system_prompt']
+                    logger.info(f">>> 优化方法已更新，重置系统提示词为最高评分版（平均{best['avg_total']:.1f}），开始下一轮")
+                except Exception as e:
+                    logger.error(f"外层优化方法异常: {e}，终止外层循环")
                     break
 
-            except Exception as e:
-                logger.error(f"第{attempt}次尝试异常: {e}")
-                yield f"data: {json.dumps({'type': 'error', 'message': f'第{attempt}次尝试异常: {str(e)}'}, ensure_ascii=False)}\n\n"
-                if not results:
-                    return
-
-        # 按行号排序后保存最终结果
+        # 保存最终结果
         try:
             results.sort(key=lambda r: r['row'])
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
             output_filename_xlsx = f"AI评估结果_{timestamp}.xlsx"
             output_filename_html = f"AI评估结果_{timestamp}.html"
             output_xlsx = os.path.join(app.config['OUTPUT_FOLDER'], output_filename_xlsx)
@@ -848,19 +1101,37 @@ def process_questions():
         # 最终汇总
         try:
             logger.info("=" * 60)
-            if len(all_attempt_logs) > 1:
-                first_avg = all_attempt_logs[0]['avg_total']
-                best = max(all_attempt_logs, key=lambda x: x['avg_total'])
-                logger.info(f"各次尝试平均总分: " + " → ".join(f"第{e['attempt']}次={e['avg_total']:.1f}" for e in all_attempt_logs))
+            # 汇总所有尝试
+            all_attempts = []
+            for rl in all_round_logs:
+                all_attempts.extend(rl['all_attempt_logs'])
+            if len(all_attempts) > 1:
+                first_avg = all_attempts[0]['avg_total']
+                best = max(all_attempts, key=lambda x: x['avg_total'])
+                logger.info(f"各次尝试平均总分: " + " → ".join(f"第{e['attempt']}次={e['avg_total']:.1f}" for e in all_attempts))
                 logger.info(f"评分提升: {first_avg:.1f} → {best['avg_total']:.1f} (提高了 {best['avg_total'] - first_avg:.1f} 分)")
-                logger.info(f"===== 最高评分提示词(第{best['attempt']}次, 平均总分={best['avg_total']:.1f})完整内容 =====\n"
-                            f"{best['system_prompt']}\n"
-                            f"===== 提示词结束 =====")
-            logger.info(f"========== 全部完成，共{attempt}次尝试，结果已保存 ==========")
+                inner_att = best.get('inner_attempt', '?')
+                # 找到该attempt所属的外层轮次
+                best_round = '?'
+                for rl in all_round_logs:
+                    for a in rl['all_attempt_logs']:
+                        if a['attempt'] == best['attempt']:
+                            best_round = rl['round']
+                            break
+                logger.info("")
+                logger.info("=" * 60)
+                logger.info("===== 保存最优提示词开始 =====")
+                logger.info(f"外层第{best_round}轮-内层第{inner_att}次, 第{best['attempt']}次全局, 平均总分={best['avg_total']:.1f}")
+                logger.info("=" * 60)
+                logger.info(best['system_prompt'])
+                logger.info("=" * 60)
+                logger.info("===== 保存最优提示词结束 =====")
+                logger.info("=" * 60)
+            logger.info(f"========== 全部完成，共{global_attempt}次尝试（{len(all_round_logs)}轮优化方法），结果已保存 ==========")
         except Exception as e:
             logger.error(f"汇总日志异常: {e}")
 
-        yield f"data: {json.dumps({'type': 'complete', 'output_filename': output_filename_xlsx, 'output_filename_html': output_filename_html, 'attempts': attempt}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'complete', 'output_filename': output_filename_xlsx, 'output_filename_html': output_filename_html, 'attempts': global_attempt}, ensure_ascii=False)}\n\n"
 
     return app.response_class(generate(), mimetype='text/event-stream',
                               headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
@@ -950,7 +1221,7 @@ def api_evaluate():
                 result = future.result()
                 results[result['index']] = result
 
-        avg_total = _log_attempt_summary(attempt, system_prompt, results)
+        avg_total = _log_attempt_summary(attempt, results)
         all_attempt_logs.append({
             'attempt': attempt,
             'system_prompt': system_prompt,
@@ -961,7 +1232,8 @@ def api_evaluate():
         if need_retry:
             logger.info(f"api_evaluate: 平均总分 {avg_total:.1f} < 70，优化提示词...")
             old_prompt = system_prompt
-            system_prompt = optimize_prompt(system_prompt, results)
+            ctx = f"api_evaluate | 第{attempt}次尝试 | 优化前平均分={avg_total:.1f} | 原始长度={len(system_prompt)}"
+            system_prompt = optimize_prompt(system_prompt, results, attempt, context_info=ctx)
             if system_prompt == old_prompt:
                 logger.info("提示词未变更，终止重试")
                 break
@@ -978,11 +1250,15 @@ def api_evaluate():
             )
 
         best = max(all_attempt_logs, key=lambda x: x['avg_total'])
-        logger.info(
-            f"===== 最高评分提示词(第{best['attempt']}次, 平均总分={best['avg_total']:.1f})完整内容 =====\n"
-            f"{best['system_prompt']}\n"
-            f"===== 提示词结束 ====="
-        )
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("===== 保存最优提示词开始 =====")
+        logger.info(f"第{best['attempt']}次, 平均总分={best['avg_total']:.1f}")
+        logger.info("=" * 60)
+        logger.info(best['system_prompt'])
+        logger.info("=" * 60)
+        logger.info("===== 保存最优提示词结束 =====")
+        logger.info("=" * 60)
 
     logger.info(f"[api_evaluate] 全部完成，共尝试{attempt}次")
 

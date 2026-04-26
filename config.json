@@ -1,0 +1,10 @@
+{
+    "max_attempts": 3,
+    "max_optimize_rounds": 2,
+    "thread_count": 4,
+    "score_threshold": 80,
+    "llm_api_key": "f5d8c53a2872430fb5de64c5c690bbf9.a3WyEO2pOajsX404",
+    "llm_base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "model": "glm-5",
+    "eval_rounds": 3
+}
