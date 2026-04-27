@@ -66,6 +66,33 @@
             opacity: 0.85;
         }
 
+        /* ===== Tab Navigation ===== */
+        .tab-nav {
+            display: flex;
+            gap: 4px;
+            margin-left: auto;
+        }
+
+        .tab-btn {
+            background: transparent;
+            color: rgba(255,255,255,0.6);
+            border: none;
+            padding: 6px 18px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            border-radius: 3px;
+            transition: all 0.2s;
+        }
+
+        .tab-btn:hover { color: white; background: rgba(255,255,255,0.08); }
+
+        .tab-btn.active {
+            color: white;
+            background: var(--pwc-orange);
+            font-weight: 600;
+        }
+
         /* ===== Orange accent stripe ===== */
         .accent-stripe {
             height: 3px;
@@ -740,6 +767,58 @@
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: var(--pwc-gray-3); border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: var(--pwc-gray-2); }
+
+        /* ===== Quick Score Form ===== */
+        .quick-field { margin-bottom: 16px; }
+        .quick-field label {
+            display: block;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--pwc-dark);
+            margin-bottom: 6px;
+        }
+        .quick-field .required { color: var(--pwc-red); }
+        .quick-field textarea {
+            width: 100%;
+            font-size: 13px;
+            line-height: 1.7;
+            border: 1px solid var(--pwc-gray-3);
+            border-radius: 3px;
+            padding: 12px;
+            resize: vertical;
+            font-family: inherit;
+            color: var(--pwc-dark);
+            transition: border-color 0.2s;
+        }
+        .quick-field textarea:focus {
+            outline: none;
+            border-color: var(--pwc-orange);
+            box-shadow: 0 0 0 2px rgba(208, 74, 2, 0.12);
+        }
+        .quick-field textarea::placeholder { color: var(--pwc-gray-3); }
+
+        .quick-result-scores {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .quick-result-card {
+            text-align: center;
+            padding: 14px 6px;
+            background: var(--pwc-gray-5);
+            border-radius: 4px;
+            border: 1px solid var(--pwc-gray-4);
+        }
+        .quick-result-card .label { font-size: 12px; color: var(--pwc-gray-2); margin-bottom: 4px; }
+        .quick-result-card .value { font-size: 24px; font-weight: 700; }
+        .quick-result-card .reason { font-size: 12px; color: var(--pwc-gray-2); text-align: left; margin-top: 8px; line-height: 1.5; }
+        .quick-result-total {
+            display: flex; align-items: center; justify-content: space-between;
+            background: var(--pwc-dark); color: white; padding: 12px 20px; border-radius: 4px;
+        }
+        .quick-result-total .label { font-size: 14px; color: rgba(255,255,255,0.7); }
+        .quick-result-total .value { font-size: 28px; font-weight: 700; }
     </style>
 </head>
 <body>
@@ -750,12 +829,17 @@
             <div class="logo-text"><span>p</span><span>w</span><span>c</span></div>
         </div>
         <div class="page-title">知识库AI回答评估工具</div>
+        <div class="tab-nav">
+            <button class="tab-btn active" data-tab="batch">批量评估</button>
+            <button class="tab-btn" data-tab="quick">快速评分</button>
+        </div>
     </div>
     <div class="accent-stripe"></div>
 
     <div class="container">
 
-        <!-- Prompt Card - Always visible -->
+        <!-- Tab: Batch Evaluation -->
+        <div id="tabBatch">
         <div class="card" id="promptCard">
             <div class="card-title">评分提示词配置</div>
             <div class="prompt-header">
@@ -769,6 +853,17 @@
                 可用变量：<code>{question}</code> 问题、<code>{reference_answer}</code> 参考答案、<code>{ai_answer}</code> AI回答 &nbsp;|&nbsp; 编辑后自动保存，处理时自动使用当前内容
             </small>
             <textarea id="scoringPrompt" rows="10" placeholder="加载默认提示词中..."></textarea>
+        </div>
+
+        <!-- Quick Score Jump -->
+        <div class="card" style="cursor:pointer;transition:box-shadow 0.2s;border-left:4px solid var(--pwc-orange);" id="jumpToQuickScore">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+                <div>
+                    <div style="font-size:16px;font-weight:600;color:var(--pwc-dark);">快速评分</div>
+                    <div style="font-size:13px;color:var(--pwc-gray-2);margin-top:4px;">手动输入问题、AI回答和建议回答，直接评分</div>
+                </div>
+                <div style="font-size:22px;color:var(--pwc-orange);">&rarr;</div>
+            </div>
         </div>
 
         <!-- Upload Card -->
@@ -852,11 +947,61 @@
             </div>
         </div>
 
+        </div><!-- end #tabBatch -->
+
+        <!-- Tab: Quick Score -->
+        <div id="tabQuick" style="display:none;">
+
+            <div class="card">
+                <div class="card-title">快速评分</div>
+                <p style="color:var(--pwc-gray-2);font-size:13px;margin-bottom:18px;">手动输入问题和答案，直接调用评分接口进行评估</p>
+
+                <div class="quick-form">
+                    <div class="quick-field">
+                        <label>问题 <span class="required">*</span></label>
+                        <textarea id="quickQuestion" rows="4" placeholder="请输入问题内容..."></textarea>
+                    </div>
+                    <div class="quick-field">
+                        <label>AI回答 <span class="required">*</span></label>
+                        <textarea id="quickAiAnswer" rows="6" placeholder="请输入AI的回答内容..."></textarea>
+                    </div>
+                    <div class="quick-field">
+                        <label>建议回答（参考答案） <span class="required">*</span></label>
+                        <textarea id="quickRefAnswer" rows="6" placeholder="请输入建议的标准回答内容..."></textarea>
+                    </div>
+
+                    <div class="buttons" style="margin-top:20px;">
+                        <button class="btn btn-primary" id="quickScoreBtn">开始评分</button>
+                    </div>
+
+                    <div class="error-message" id="quickError"></div>
+
+                    <div id="quickResultArea" style="display:none;margin-top:24px;">
+                        <div class="card-title" style="font-size:16px;">评分结果</div>
+                        <div id="quickScoreResult"></div>
+                    </div>
+                </div>
+            </div>
+
+        </div><!-- end #tabQuick -->
+
     </div>
 
     <div class="footer">&copy; 2026 PwC. All rights reserved.</div>
 
     <script>
+        // ===== Tab Switching =====
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelector(`.tab-btn[data-tab="${tabName}"]`).classList.add('active');
+            document.getElementById('tabBatch').style.display = tabName === 'batch' ? '' : 'none';
+            document.getElementById('tabQuick').style.display = tabName === 'quick' ? '' : 'none';
+        }
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+        });
+        document.getElementById('jumpToQuickScore').addEventListener('click', () => switchTab('quick'));
+
         let uploadedFilename = null;
         let outputXlsx = null;
         let outputHtmlFile = null;
@@ -1231,6 +1376,89 @@
         downloadExcelBtn.addEventListener('click', () => {
             if (outputXlsx) window.location.href = '/download/' + outputXlsx;
         });
+
+        // ===== Quick Score =====
+        const quickScoreBtn = document.getElementById('quickScoreBtn');
+        const quickError = document.getElementById('quickError');
+        const quickResultArea = document.getElementById('quickResultArea');
+        const quickScoreResult = document.getElementById('quickScoreResult');
+
+        quickScoreBtn.addEventListener('click', () => {
+            const question = document.getElementById('quickQuestion').value.trim();
+            const aiAnswer = document.getElementById('quickAiAnswer').value.trim();
+            const refAnswer = document.getElementById('quickRefAnswer').value.trim();
+
+            quickError.classList.remove('show');
+            quickResultArea.style.display = 'none';
+
+            if (!question || !aiAnswer || !refAnswer) {
+                quickError.textContent = '请填写所有必填项（问题、AI回答、建议回答）';
+                quickError.classList.add('show');
+                return;
+            }
+
+            quickScoreBtn.disabled = true;
+            quickScoreBtn.innerHTML = '<span class="loading-spinner"></span>评分中...';
+
+            fetch('/quick_score', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    question: question,
+                    ai_answer: aiAnswer,
+                    reference_answer: refAnswer
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) {
+                    quickError.textContent = data.error || '评分失败';
+                    quickError.classList.add('show');
+                    return;
+                }
+                renderQuickScore(data.scores);
+                quickResultArea.style.display = '';
+            })
+            .catch(err => {
+                quickError.textContent = '请求失败: ' + err.message;
+                quickError.classList.add('show');
+            })
+            .finally(() => {
+                quickScoreBtn.disabled = false;
+                quickScoreBtn.innerHTML = '开始评分';
+            });
+        });
+
+        function renderQuickScore(scores) {
+            if (!scores || !scores.success) {
+                const msg = scores ? (scores.accuracy_reason || '评分失败') : '评分失败';
+                quickScoreResult.innerHTML = `<div style="padding:16px;background:#FEF2F2;border-radius:4px;color:#CB333B;">${escapeHtml(msg)}</div>`;
+                return;
+            }
+            const items = [
+                { label: '答案准确性(60)', score: scores.accuracy_score, max: 60, reason: scores.accuracy_reason },
+                { label: '法条援引度(20)', score: scores.citation_score, max: 20, reason: scores.citation_reason },
+                { label: '总结完整度(20)', score: scores.summary_score, max: 20, reason: scores.summary_reason },
+            ];
+            const cardsHtml = items.map(it => {
+                const cls = (it.score / it.max) >= 0.8 ? 'high' : (it.score / it.max) >= 0.5 ? 'mid' : 'low';
+                const color = cls === 'high' ? '#2A9D8F' : cls === 'low' ? '#CB333B' : '#D04A02';
+                return `<div class="quick-result-card">
+                    <div class="label">${it.label}</div>
+                    <div class="value" style="color:${color};">${it.score}/${it.max}</div>
+                    <div class="reason">${escapeHtml(it.reason || '')}</div>
+                </div>`;
+            }).join('');
+
+            const total = scores.total_score;
+            const totalColor = total >= 80 ? '#2A9D8F' : total >= 50 ? '#D04A02' : '#CB333B';
+            quickScoreResult.innerHTML = `
+                <div class="quick-result-scores">${cardsHtml}</div>
+                <div class="quick-result-total">
+                    <span class="label">总分</span>
+                    <span class="value" style="color:${totalColor};">${total}/100</span>
+                </div>`;
+        }
     </script>
 </body>
 </html>

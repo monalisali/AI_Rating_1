@@ -214,6 +214,10 @@ def request_scoring_api(prompt: str, timeout: int = 300) -> str:
 
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 resp = json.loads(response.read().decode('utf-8'))
+                if 'error' in resp:
+                    err_msg = resp['error'].get('message', json.dumps(resp['error'], ensure_ascii=False)) if isinstance(resp['error'], dict) else str(resp['error'])
+                    result_holder[1] = ValueError(f"评分API返回错误: {err_msg}")
+                    return
                 if 'choices' not in resp or not resp['choices']:
                     result_holder[1] = ValueError(f"API返回格式异常: {json.dumps(resp, ensure_ascii=False)[:300]}")
                     return
@@ -373,18 +377,27 @@ def optimize_prompt(current_prompt: str, results_with_scores: list, attempt: int
     try:
         new_prompt = request_scoring_api(optimize_instruction)
         max_len = int(len(current_prompt) * 1.5)
-        # 先保存到文件（无论是否被丢弃）
+        # 判断是否会被丢弃
+        discarded = len(new_prompt) > max_len
+        status = "已丢弃" if discarded else "已采用"
+        reason = ""
+        if discarded:
+            reason = f"\n丢弃原因: 长度{len(new_prompt)}超过上限{max_len}（原始{len(current_prompt)}的150%）"
+        # 保存到文件（无论是否被丢弃）
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         prompt_file = os.path.join(LOG_DIR, f"optimized_prompt_{ts[:8]}.txt")
         with open(prompt_file, 'a', encoding='utf-8') as f:
             f.write(f"\n{'='*60}\n")
-            f.write(f"===== 第{attempt}次优化生成的提示词 ({ts}) =====\n")
+            f.write(f"===== 第{attempt}次优化生成的提示词 ({ts}) [{status}] =====\n")
             if context_info:
                 f.write(f"{context_info}\n")
+            f.write(f"状态: {status} | 原始长度={len(current_prompt)} → 新长度={len(new_prompt)} | 上限={max_len}\n")
+            if reason:
+                f.write(f"{reason}\n")
             f.write(f"{'='*60}\n\n")
             f.write(new_prompt)
             f.write("\n")
-        if len(new_prompt) > max_len:
+        if discarded:
             logger.warning(f"[optimize_prompt] 优化后提示词过长（{len(new_prompt)} > {max_len}），已记录但丢弃，保留原始提示词")
             return current_prompt
         logger.info(f"[optimize_prompt] 优化完成，原始长度={len(current_prompt)}, 新长度={len(new_prompt)}，已保存到: {prompt_file}")
@@ -1135,6 +1148,26 @@ def process_questions():
 
     return app.response_class(generate(), mimetype='text/event-stream',
                               headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/quick_score', methods=['POST'])
+def quick_score():
+    """快速评分接口 - 手动输入问题和答案直接评分"""
+    data = request.json
+    question = (data.get('question') or '').strip()
+    ai_answer = (data.get('ai_answer') or '').strip()
+    reference_answer = (data.get('reference_answer') or '').strip()
+    scoring_prompt_template = data.get('scoring_prompt') or None
+
+    if not question or not ai_answer or not reference_answer:
+        return jsonify({'success': False, 'error': '问题、AI回答、建议回答均为必填'}), 400
+
+    try:
+        scores = score_answer(question, ai_answer, reference_answer, scoring_prompt_template)
+        return jsonify({'success': True, 'scores': scores})
+    except Exception as e:
+        logger.error(f"快速评分失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/evaluate', methods=['POST'])
