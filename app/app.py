@@ -18,8 +18,11 @@ from flask import Flask, render_template, request, jsonify, send_file
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, Border, Side
 
+# 项目根目录（app.py在app/子目录下，根目录是上一级）
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # 日志配置：同时输出到控制台和文件
-LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+LOG_DIR = os.path.join(ROOT_DIR, 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOG_DIR, f"optimize_{datetime.now().strftime('%Y%m%d')}.log")
 
@@ -38,9 +41,9 @@ _console_handler.setLevel(logging.INFO)
 _console_handler.setFormatter(_log_fmt)
 logger.addHandler(_console_handler)
 
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['OUTPUT_FOLDER'] = 'outputs'
+app = Flask(__name__, template_folder=os.path.join(ROOT_DIR, 'templates'))
+app.config['UPLOAD_FOLDER'] = os.path.join(ROOT_DIR, 'uploads')
+app.config['OUTPUT_FOLDER'] = os.path.join(ROOT_DIR, 'outputs')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 最大16MB
 app.config['JSON_AS_ASCII'] = False
 
@@ -50,9 +53,9 @@ os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
 
 ALLOWED_EXTENSIONS = {'xlsx', 'xls'}
 
-# Prompt.md 路径
-PROMPT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Prompt.md')
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+# Prompt.md 和 config.json 在项目根目录
+PROMPT_FILE = os.path.join(ROOT_DIR, 'Prompt.md')
+CONFIG_FILE = os.path.join(ROOT_DIR, 'config.json')
 
 
 def get_config(key, default=None):
@@ -74,10 +77,21 @@ def load_system_prompt():
     return ""
 
 
-# 评分模型配置 - 使用内网API
-SCORING_API_URL = os.environ.get('ANTHROPIC_BASE_URL', 'http://ai.tech.tax.asia.pwcinternal.com:3002') + '/v1/chat/completions'
-SCORING_API_KEY = os.environ.get('ANTHROPIC_AUTH_TOKEN', '')
-SCORING_MODEL = os.environ.get('ANTHROPIC_MODEL', 'glm-coding-5-8')
+# 评分模型配置 - 优先从config.json读取，环境变量兜底
+def _get_scoring_config():
+    url = get_config('scoring_api_url', '')
+    if not url:
+        url = os.environ.get('ANTHROPIC_BASE_URL', 'http://ai.tech.tax.asia.pwcinternal.com:3002') + '/v1/chat/completions'
+    key = get_config('scoring_api_key', '')
+    if not key:
+        key = os.environ.get('ANTHROPIC_AUTH_TOKEN', '')
+    model = get_config('scoring_model', '')
+    if not model:
+        model = os.environ.get('ANTHROPIC_MODEL', 'glm-coding-5-8')
+    return url, key, model
+
+SCORING_API_URL, SCORING_API_KEY, SCORING_MODEL = _get_scoring_config()
+logger.info(f"[config] 评分API: {SCORING_API_URL}, 模型: {SCORING_MODEL}, Key: {'已配置' if SCORING_API_KEY else '未配置'}")
 
 
 def allowed_file(filename):
@@ -87,10 +101,23 @@ def allowed_file(filename):
 model参数
 百炼模型：glm-5.1
 GTS模型：saas.glm-5.1
+
+GTS模型配置：
+https://genai-sharedservice-uat.cn.asia.pwcinternal.com
+sk-JLfi9OVwSLESgKy0Xw_N2w
+saas.glm-5.1
+
+智谱官方
+https://open.bigmodel.cn/api/paas/v4
+f5d8c53a2872430fb5de64c5c690bbf9.a3WyEO2pOajsX404
+glm-5.1
+
 """
 
-def request_api(message: str, session_id: str = "", custom_system_prompt: str = "") -> tuple:
-    """请求知识库API接口"""
+def request_api(message: str, session_id: str = "", custom_system_prompt: str = "", max_retries: int = 3) -> tuple:
+    """请求知识库API接口，自动重试IncompleteRead错误"""
+    import http.client
+
     url = 'https://ai.tech.tax.asia.pwcinternal.com:5007/api/chat-stream'
     payload = {
         'message': message,
@@ -116,17 +143,22 @@ def request_api(message: str, session_id: str = "", custom_system_prompt: str = 
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
 
-    with urllib.request.urlopen(req, context=ctx, timeout=300) as response:
-        returned_session_id = response.headers.get('X-Session-Id', '')
-        chunks = []
-        while True:
-            chunk = response.read(8192)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        result = b''.join(chunks).decode('utf-8')
-
-    return result, returned_session_id
+    for attempt in range(1, max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=300) as response:
+                returned_session_id = response.headers.get('X-Session-Id', '')
+                chunks = []
+                while True:
+                    chunk = response.read(8192)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                result = b''.join(chunks).decode('utf-8')
+            return result, returned_session_id
+        except (http.client.IncompleteRead, ConnectionError, TimeoutError) as e:
+            logger.warning(f"[request_api] 第{attempt}次请求失败({type(e).__name__}: {e})，{'重试中...' if attempt < max_retries else '已达最大重试次数'}")
+            if attempt >= max_retries:
+                raise
 
 
 def parse_response(api_response: str) -> dict:
@@ -145,12 +177,6 @@ def parse_response(api_response: str) -> dict:
                 pass
 
     full = ''.join(contents)
-
-    # 截取"核心发现"之后的内容
-    marker = '核心发现'
-    idx = full.find(marker)
-    if idx != -1:
-        full = full[idx:]
 
     return {'full_content': full}
 
@@ -195,45 +221,56 @@ def chat_with_confirmation(question: str, max_rounds: int = 8, system_prompt: st
     return content
 
 
-def request_scoring_api(prompt: str, timeout: int = 300) -> str:
-    """请求内网AI评分API，带线程超时保护防止卡死"""
+def request_scoring_api(prompt: str, timeout: int = 300, max_retries: int = 3) -> str:
+    """请求内网AI评分API，带线程超时保护防止卡死，遇到429自动重试"""
     import threading
-    result_holder = [None, None]  # [result, error]
+    import time
 
-    def _call():
-        try:
-            data = json.dumps({
-                'model': SCORING_MODEL,
-                'messages': [{'role': 'user', 'content': prompt}]
-            }).encode('utf-8')
+    for retry in range(1, max_retries + 1):
+        result_holder = [None, None]  # [result, error]
 
-            req = urllib.request.Request(SCORING_API_URL, data=data, headers={
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {SCORING_API_KEY}'
-            })
+        def _call():
+            try:
+                url, key, model = _get_scoring_config()
+                data = json.dumps({
+                    'model': model,
+                    'messages': [{'role': 'user', 'content': prompt}]
+                }).encode('utf-8')
 
-            with urllib.request.urlopen(req, timeout=timeout) as response:
-                resp = json.loads(response.read().decode('utf-8'))
-                if 'error' in resp:
-                    err_msg = resp['error'].get('message', json.dumps(resp['error'], ensure_ascii=False)) if isinstance(resp['error'], dict) else str(resp['error'])
-                    result_holder[1] = ValueError(f"评分API返回错误: {err_msg}")
-                    return
-                if 'choices' not in resp or not resp['choices']:
-                    result_holder[1] = ValueError(f"API返回格式异常: {json.dumps(resp, ensure_ascii=False)[:300]}")
-                    return
-                result_holder[0] = resp['choices'][0]['message']['content']
-        except Exception as e:
-            result_holder[1] = e
+                req = urllib.request.Request(url, data=data, headers={
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {key}'
+                })
 
-    t = threading.Thread(target=_call, daemon=True)
-    t.start()
-    t.join(timeout=timeout + 30)
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    resp = json.loads(response.read().decode('utf-8'))
+                    if 'error' in resp:
+                        err_msg = resp['error'].get('message', json.dumps(resp['error'], ensure_ascii=False)) if isinstance(resp['error'], dict) else str(resp['error'])
+                        result_holder[1] = ValueError(f"评分API返回错误: {err_msg}")
+                        return
+                    if 'choices' not in resp or not resp['choices']:
+                        result_holder[1] = ValueError(f"API返回格式异常: {json.dumps(resp, ensure_ascii=False)[:300]}")
+                        return
+                    result_holder[0] = resp['choices'][0]['message']['content']
+            except Exception as e:
+                result_holder[1] = e
 
-    if t.is_alive():
-        raise TimeoutError(f"评分API调用超过{timeout + 30}秒，已强制终止")
-    if result_holder[1] is not None:
-        raise result_holder[1]
-    return result_holder[0]
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+        t.join(timeout=timeout + 30)
+
+        if t.is_alive():
+            raise TimeoutError(f"评分API调用超过{timeout + 30}秒，已强制终止")
+        if result_holder[1] is not None:
+            err = result_holder[1]
+            is_429 = '429' in str(err)
+            if is_429 and retry < max_retries:
+                wait = retry * 10
+                logger.warning(f"[request_scoring_api] 429限流，等待{wait}秒后重试（{retry}/{max_retries}）")
+                time.sleep(wait)
+                continue
+            raise err
+        return result_holder[0]
 
 
 # 默认评分提示词模板（可通过前端覆盖）
@@ -376,13 +413,24 @@ def optimize_prompt(current_prompt: str, results_with_scores: list, attempt: int
 
     try:
         new_prompt = request_scoring_api(optimize_instruction)
-        max_len = int(len(current_prompt) * 1.5)
+        max_relative_ratio = get_config('max_prompt_ratio', 1.5)
+        max_relative_len = int(len(current_prompt) * max_relative_ratio)
+        max_absolute_len = get_config('max_prompt_length', 0)
+        # 取相对限制和绝对限制中较小的值
+        max_len = max_relative_len
+        if max_absolute_len > 0:
+            max_len = min(max_relative_len, max_absolute_len)
         # 判断是否会被丢弃
         discarded = len(new_prompt) > max_len
         status = "已丢弃" if discarded else "已采用"
         reason = ""
         if discarded:
-            reason = f"\n丢弃原因: 长度{len(new_prompt)}超过上限{max_len}（原始{len(current_prompt)}的150%）"
+            reasons = []
+            if len(new_prompt) > max_relative_len:
+                reasons.append(f"长度{len(new_prompt)}超过相对上限{max_relative_len}（原始{len(current_prompt)}的150%）")
+            if max_absolute_len > 0 and len(new_prompt) > max_absolute_len:
+                reasons.append(f"长度{len(new_prompt)}超过绝对上限{max_absolute_len}（配置项max_prompt_length）")
+            reason = f"\n丢弃原因: {'; '.join(reasons)}"
         # 保存到文件（无论是否被丢弃）
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         prompt_file = os.path.join(LOG_DIR, f"optimized_prompt_{ts[:8]}.txt")
@@ -742,7 +790,7 @@ def index():
 
 
 # 提示词持久化文件路径
-SCORING_PROMPT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scoring_prompt.txt')
+SCORING_PROMPT_FILE = os.path.join(ROOT_DIR, 'scoring_prompt.txt')
 
 
 def load_saved_prompt():

@@ -3,8 +3,13 @@
     "max_optimize_rounds": 2,
     "thread_count": 4,
     "score_threshold": 80,
-    "llm_api_key": "f5d8c53a2872430fb5de64c5c690bbf9.a3WyEO2pOajsX404",
-    "llm_base_url": "https://open.bigmodel.cn/api/paas/v4",
-    "model": "glm-5",
-    "eval_rounds": 4
+    "llm_api_key": "sk-JLfi9OVwSLESgKy0Xw_N2w",
+    "llm_base_url": "https://genai-sharedservice-uat.cn.asia.pwcinternal.com",
+    "model": "saas.glm-5.1",
+    "eval_rounds": 4,
+    "scoring_api_url": "http://ai.tech.tax.asia.pwcinternal.com:3002/v1/chat/completions",
+    "scoring_api_key": "sk-wKJ3gwHNsyZL3oZDZrOMYlQbLbCxY8QpLDxRYMqCGp9Ms4fz",
+    "scoring_model": "glm-coding-5-5",
+    "max_prompt_length": 30000,
+    "max_prompt_ratio": 1.3
 }
