@@ -22,6 +22,8 @@ CONFIG = {
     "api_key": "ark-6d059414-9147-47b1-a004-8cc930a2e91d-c527b",
     # Embedding 接入点 ID，绑定 doubao-embedding-vision 模型（仅 doubao 模式使用）
     "embedding_endpoint_id": "ep-20260429184857-sxcxs",
+    # Chat 接入点 ID，绑定 Doubao-Seed-2.0-pro 模型，用于生成场景强化摘要
+    "chat_endpoint_id": "ep-20260429185101-4pqz5",
     "similarity_threshold": 0.6
 }
 
@@ -52,8 +54,7 @@ def generate_scene_enhanced_summary(article_title: str, article_content: str) ->
         "Authorization": f"Bearer {CONFIG['api_key']}"
     }
     payload = {
-        # Chat 接入点 ID，绑定 Doubao-Seed-2.0-pro 模型，用于生成场景强化摘要
-        "model": "ep-20260429185101-4pqz5",
+        "model": CONFIG["chat_endpoint_id"],
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2
     }
