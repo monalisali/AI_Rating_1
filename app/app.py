@@ -4,6 +4,33 @@
 Web应用 - 提供Excel上传页面并调用API处理
 支持AI回答和语义对比打分
 """
+"""
+model参数，如：
+百炼模型智谱：glm-5.1
+GTS模型智谱：saas.glm-5.1
+
+
+1. GTS模型配置：
+url: https://genai-sharedservice-uat.cn.asia.pwcinternal.com
+key: sk-JLfi9OVwSLESgKy0Xw_N2w
+model:
+-saas.glm-5.1
+-saas.qwen3.5-plus
+
+2. 智谱官方
+url: https://open.bigmodel.cn/api/paas/v4
+key: f5d8c53a2872430fb5de64c5c690bbf9.a3WyEO2pOajsX404
+model：
+-glm-5.1
+
+3. 加油站
+url: http://ai.tech.tax.asia.pwcinternal.com:3002
+key: sk-wKJ3gwHNsyZL3oZDZrOMYlQbLbCxY8QpLDxRYMqCGp9Ms4fz
+model:
+- bedrock.anthropic.claude-opus-4-7 (很贵)
+
+"""
+
 
 import os
 import re
@@ -97,26 +124,11 @@ logger.info(f"[config] 评分API: {SCORING_API_URL}, 模型: {SCORING_MODEL}, Ke
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-"""
-model参数
-百炼模型：glm-5.1
-GTS模型：saas.glm-5.1
 
-GTS模型配置：
-https://genai-sharedservice-uat.cn.asia.pwcinternal.com
-sk-JLfi9OVwSLESgKy0Xw_N2w
-saas.glm-5.1
-
-智谱官方
-https://open.bigmodel.cn/api/paas/v4
-f5d8c53a2872430fb5de64c5c690bbf9.a3WyEO2pOajsX404
-glm-5.1
-
-"""
-
-def request_api(message: str, session_id: str = "", custom_system_prompt: str = "", max_retries: int = 3) -> tuple:
-    """请求知识库API接口，自动重试IncompleteRead错误"""
+def request_api(message: str, session_id: str = "", custom_system_prompt: str = "", max_retries: int = 3, timeout: int = 600) -> tuple:
+    """请求知识库API接口，线程级超时保护，自动重试"""
     import http.client
+    import threading
 
     url = 'https://ai.tech.tax.asia.pwcinternal.com:5007/api/chat-stream'
     payload = {
@@ -144,26 +156,52 @@ def request_api(message: str, session_id: str = "", custom_system_prompt: str = 
     ctx.verify_mode = ssl.CERT_NONE
 
     for attempt in range(1, max_retries + 1):
-        try:
-            with urllib.request.urlopen(req, context=ctx, timeout=300) as response:
-                returned_session_id = response.headers.get('X-Session-Id', '')
-                chunks = []
-                while True:
-                    chunk = response.read(8192)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                result = b''.join(chunks).decode('utf-8')
-            return result, returned_session_id
-        except (http.client.IncompleteRead, ConnectionError, TimeoutError) as e:
-            logger.warning(f"[request_api] 第{attempt}次请求失败({type(e).__name__}: {e})，{'重试中...' if attempt < max_retries else '已达最大重试次数'}")
+        result_holder = [None, None]  # [result_tuple, error]
+
+        def _call():
+            try:
+                with urllib.request.urlopen(req, context=ctx, timeout=timeout) as response:
+                    returned_session_id = response.headers.get('X-Session-Id', '')
+                    chunks = []
+                    while True:
+                        chunk = response.read(8192)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                    result = b''.join(chunks).decode('utf-8')
+                result_holder[0] = (result, returned_session_id)
+            except Exception as e:
+                result_holder[1] = e
+
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+        t.join(timeout=timeout + 60)
+
+        if t.is_alive():
+            logger.warning(f"[request_api] 第{attempt}次请求线程超时（>{timeout + 60}秒），强制跳过")
             if attempt >= max_retries:
-                raise
+                raise TimeoutError(f"5007 API调用超时（>{timeout + 60}秒），已重试{max_retries}次")
+            continue
+
+        if result_holder[1] is not None:
+            err = result_holder[1]
+            if isinstance(err, (http.client.IncompleteRead, ConnectionError, TimeoutError)):
+                logger.warning(f"[request_api] 第{attempt}次请求失败({type(err).__name__}: {err})，{'重试中...' if attempt < max_retries else '已达最大重试次数'}")
+                if attempt >= max_retries:
+                    raise
+            else:
+                raise err
+
+        if result_holder[0] is not None:
+            return result_holder[0]
+
+    raise RuntimeError("request_api: 未获取到结果")
 
 
 def parse_response(api_response: str) -> dict:
     """解析SSE流式API响应"""
     contents = []
+    error_msg = None
     for line in api_response.strip().split('\n'):
         line = line.strip()
         if line.startswith('data:'):
@@ -172,11 +210,16 @@ def parse_response(api_response: str) -> dict:
                 if data.get('type') == 'content':
                     contents.append(data.get('content', ''))
                 elif data.get('type') == 'error':
-                    logger.error(f"[parse_response] API返回错误: {data}")
+                    error_msg = data.get('content', str(data))
+                    logger.error(f"[parse_response] API返回错误: {error_msg}")
             except json.JSONDecodeError:
                 pass
 
     full = ''.join(contents)
+
+    # 如果有错误且没有任何内容，抛异常让调用方重试
+    if error_msg and not full.strip():
+        raise RuntimeError(f"5007 API错误: {error_msg}")
 
     return {'full_content': full}
 
@@ -204,19 +247,25 @@ def is_incomplete_answer(content: str) -> bool:
 
 
 def chat_with_confirmation(question: str, max_rounds: int = 8, system_prompt: str = "") -> str:
-    """执行多轮对话，自动处理确认和等待完整答案"""
+    """执行多轮对话，自动处理确认和等待完整答案，API错误时重试"""
     session_id = ""
     current_message = question
+    content = ""
 
-    for _ in range(max_rounds):
-        api_response, session_id = request_api(current_message, session_id, custom_system_prompt=system_prompt)
-        content = parse_response(api_response)['full_content']
-        if is_confirmation_question(content):
-            current_message = "同意，请使用这些关键词进行搜索，不需要调整。"
-        elif is_incomplete_answer(content):
-            current_message = "继续"
-        else:
-            return content
+    for round_i in range(max_rounds):
+        try:
+            api_response, session_id = request_api(current_message, session_id, custom_system_prompt=system_prompt)
+            content = parse_response(api_response)['full_content']
+            if is_confirmation_question(content):
+                current_message = "同意，请使用这些关键词进行搜索，不需要调整。"
+            elif is_incomplete_answer(content):
+                current_message = "继续"
+            else:
+                return content
+        except RuntimeError as e:
+            logger.warning(f"[chat_with_confirmation] 第{round_i+1}轮API错误: {e}，重置session重试...")
+            session_id = ""
+            current_message = question
 
     return content
 
@@ -654,7 +703,7 @@ def read_questions_from_excel(filepath):
 
 
 def save_results_to_excel(questions_with_answers, output_filepath):
-    """保存结果到新Excel，只保留问题、建议答案、评分情况"""
+    """保存结果到新Excel，含轮次信息，保留问题、建议答案、评分情况"""
     wb = Workbook()
     ws = wb.active
     ws.title = '评估结果'
@@ -665,6 +714,7 @@ def save_results_to_excel(questions_with_answers, output_filepath):
     )
 
     headers = [
+        ('轮次', 20),
         ('问题', 50),
         ('AI回答', 100),
         ('建议答案', 80),
@@ -682,19 +732,24 @@ def save_results_to_excel(questions_with_answers, output_filepath):
         cell.alignment = Alignment(wrap_text=True, vertical='center')
         ws.column_dimensions[cell.column_letter].width = width
 
-    for row_idx, (row_num, question, answer, reference_answer, scores) in enumerate(questions_with_answers, 2):
+    for row_idx, (round_label, question, answer, reference_answer, scores) in enumerate(questions_with_answers, 2):
+        # 轮次
+        cell = ws.cell(row=row_idx, column=1, value=round_label)
+        cell.alignment = Alignment(wrap_text=True, vertical='top')
+        cell.border = thin_border
+
         # 问题
-        cell = ws.cell(row=row_idx, column=1, value=question)
+        cell = ws.cell(row=row_idx, column=2, value=question)
         cell.alignment = Alignment(wrap_text=True, vertical='top')
         cell.border = thin_border
 
         # AI回答
-        cell = ws.cell(row=row_idx, column=2, value=answer)
+        cell = ws.cell(row=row_idx, column=3, value=answer)
         cell.alignment = Alignment(wrap_text=True, vertical='top')
         cell.border = thin_border
 
         # 建议答案
-        cell = ws.cell(row=row_idx, column=3, value=reference_answer or '')
+        cell = ws.cell(row=row_idx, column=4, value=reference_answer or '')
         cell.alignment = Alignment(wrap_text=True, vertical='top')
         cell.border = thin_border
 
@@ -709,7 +764,7 @@ def save_results_to_excel(questions_with_answers, output_filepath):
                 scores.get('total_score', 0)
             ]
             for i, value in enumerate(score_data):
-                cell = ws.cell(row=row_idx, column=4 + i, value=value)
+                cell = ws.cell(row=row_idx, column=5 + i, value=value)
                 cell.alignment = Alignment(wrap_text=True, vertical='top')
                 cell.border = thin_border
 
@@ -717,9 +772,9 @@ def save_results_to_excel(questions_with_answers, output_filepath):
 
 
 def save_results_to_html(questions_with_answers, output_filepath):
-    """保存结果到HTML文件，PwC风格"""
+    """保存结果到HTML文件，PwC风格，含轮次信息"""
     rows_html = ''
-    for row_idx, (row_num, question, answer, reference_answer, scores) in enumerate(questions_with_answers, 1):
+    for row_idx, (round_label, question, answer, reference_answer, scores) in enumerate(questions_with_answers, 1):
         bg = '#FFFFFF' if row_idx % 2 == 1 else '#F4F4F4'
         scores_html = ''
         if scores and scores.get('success'):
@@ -746,15 +801,17 @@ def save_results_to_html(questions_with_answers, output_filepath):
         elif scores:
             scores_html = f'<div style="margin-top:8px;padding:8px;background:#FEF2F2;border-radius:3px;color:#CB333B;font-size:13px;">评分失败</div>'
 
+        safe_round = round_label.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         safe_q = question.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         safe_ans = answer.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         safe_ref = (reference_answer or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
         rows_html += f'''<tr style="background:{bg};vertical-align:top;">
-            <td style="padding:10px;border:1px solid #E8E8E8;width:12%;">{safe_q}</td>
-            <td style="padding:10px;border:1px solid #E8E8E8;width:30%;">{safe_ans}</td>
-            <td style="padding:10px;border:1px solid #E8E8E8;width:18%;">{safe_ref}</td>
-            <td style="padding:10px;border:1px solid #E8E8E8;width:40%;">{scores_html}</td>
+            <td style="padding:10px;border:1px solid #E8E8E8;width:10%;">{safe_round}</td>
+            <td style="padding:10px;border:1px solid #E8E8E8;width:10%;">{safe_q}</td>
+            <td style="padding:10px;border:1px solid #E8E8E8;width:28%;">{safe_ans}</td>
+            <td style="padding:10px;border:1px solid #E8E8E8;width:16%;">{safe_ref}</td>
+            <td style="padding:10px;border:1px solid #E8E8E8;width:36%;">{scores_html}</td>
         </tr>'''
 
     html = f'''<!DOCTYPE html>
@@ -771,10 +828,11 @@ h1 {{ font-size:20px; font-weight:600; border-bottom:2px solid #D04A02; padding-
 <h1>AI回答评估结果</h1>
 <table style="width:100%;border-collapse:collapse;font-size:13px;">
 <thead><tr style="background:#2D2D2D;color:white;">
-<th style="padding:10px;border:1px solid #2D2D2D;width:12%;text-align:left;">问题</th>
-<th style="padding:10px;border:1px solid #2D2D2D;width:30%;text-align:left;">AI回答</th>
-<th style="padding:10px;border:1px solid #2D2D2D;width:18%;text-align:left;">建议答案</th>
-<th style="padding:10px;border:1px solid #2D2D2D;width:40%;text-align:left;">评分情况</th>
+<th style="padding:10px;border:1px solid #2D2D2D;width:10%;text-align:left;">轮次</th>
+<th style="padding:10px;border:1px solid #2D2D2D;width:10%;text-align:left;">问题</th>
+<th style="padding:10px;border:1px solid #2D2D2D;width:28%;text-align:left;">AI回答</th>
+<th style="padding:10px;border:1px solid #2D2D2D;width:16%;text-align:left;">建议答案</th>
+<th style="padding:10px;border:1px solid #2D2D2D;width:36%;text-align:left;">评分情况</th>
 </tr></thead>
 <tbody>{rows_html}</tbody>
 </table>
@@ -1073,21 +1131,37 @@ def process_questions():
                         'results': last_results
                     })
 
-                    # 评分达标，直接结束
-                    if current_prompt_avg >= score_threshold:
-                        logger.info(f">>> 平均总分 {current_prompt_avg:.1f} >= {score_threshold}，达标！")
+                    # 检查是否需要优化：平均分不达标 或 存在答案准确性低分
+                    min_accuracy_score = get_config('min_accuracy_score', 40)
+                    low_accuracy_questions = [
+                        r for r in last_results
+                        if r.get('scores') and r['scores'].get('success')
+                        and r['scores'].get('accuracy_score', 0) < min_accuracy_score
+                    ]
+                    has_low_accuracy = len(low_accuracy_questions) > 0
+                    low_accuracy_info = ""
+                    if has_low_accuracy:
+                        low_accuracy_info = f"，其中{len(low_accuracy_questions)}题准确性低于{min_accuracy_score}分（" + \
+                            "、".join(f"第{r['row']}题={r['scores']['accuracy_score']}分" for r in low_accuracy_questions) + "）"
+
+                    # 平均分达标且无准确性低分，直接结束
+                    if current_prompt_avg >= score_threshold and not has_low_accuracy:
+                        logger.info(f">>> 平均总分 {current_prompt_avg:.1f} >= {score_threshold}，且无准确性低于{min_accuracy_score}分，达标！")
                         break
 
                     need_retry = (
                         enable_scoring
                         and inner_attempt < max_attempts
-                        and current_prompt_avg < score_threshold
+                        and (current_prompt_avg < score_threshold or has_low_accuracy)
                         and current_prompt_avg >= 0
                         and len([r for r in last_results if r.get('scores') and r['scores'].get('success')]) > 0
                     )
 
                     if need_retry:
-                        logger.info(f">>> 平均总分 {current_prompt_avg:.1f} < {score_threshold}，触发第{inner_attempt}次提示词优化...")
+                        reason = f"平均总分 {current_prompt_avg:.1f} < {score_threshold}"
+                        if has_low_accuracy:
+                            reason += f" + {len(low_accuracy_questions)}题准确性低于{min_accuracy_score}分"
+                        logger.info(f">>> {reason}{low_accuracy_info}，触发第{inner_attempt}次提示词优化...")
                         yield f"data: {json.dumps({'type': 'optimizing', 'attempt': global_attempt, 'avg_score': round(current_prompt_avg, 1)}, ensure_ascii=False)}\n\n"
 
                         old_prompt = system_prompt
@@ -1142,18 +1216,24 @@ def process_questions():
                     logger.error(f"外层优化方法异常: {e}，终止外层循环")
                     break
 
-        # 保存最终结果
+        # 保存最终结果（所有轮次，按轮次区分）
         try:
-            results.sort(key=lambda r: r['row'])
+            all_results = []
+            for rl in all_round_logs:
+                round_label = f"外层{rl['round']}轮"
+                for att_log in rl['all_attempt_logs']:
+                    att_label = f"{round_label}-内层{att_log['inner_attempt']}次(平均{att_log['avg_total']:.1f})"
+                    for r in sorted(att_log['results'], key=lambda x: x['row']):
+                        all_results.append((att_label, r['question'], r['answer'], r.get('reference_answer', ''), r['scores']))
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_filename_xlsx = f"AI评估结果_{timestamp}.xlsx"
             output_filename_html = f"AI评估结果_{timestamp}.html"
             output_xlsx = os.path.join(app.config['OUTPUT_FOLDER'], output_filename_xlsx)
             output_html = os.path.join(app.config['OUTPUT_FOLDER'], output_filename_html)
-            questions_with_answers = [(r['row'], r['question'], r['answer'], r.get('reference_answer', ''), r['scores']) for r in results]
-            logger.info(f"保存结果 → Excel={output_filename_xlsx}, HTML={output_filename_html}")
-            save_results_to_excel(questions_with_answers, output_xlsx)
-            save_results_to_html(questions_with_answers, output_html)
+            logger.info(f"保存结果 → Excel={output_filename_xlsx}, HTML={output_filename_html}（共{len(all_results)}行）")
+            save_results_to_excel(all_results, output_xlsx)
+            save_results_to_html(all_results, output_html)
         except Exception as e:
             logger.error(f"保存结果异常: {e}")
             output_filename_xlsx = ""
@@ -1351,7 +1431,7 @@ def api_evaluate():
     })
 
 
-@app.route('/download/<filename>')
+@app.route('/download/<path:filename>')
 def download_file(filename):
     filepath = os.path.join(app.config['OUTPUT_FOLDER'], filename)
     if os.path.exists(filepath):
@@ -1360,4 +1440,9 @@ def download_file(filename):
 
 
 if __name__ == '__main__':
+    import sys
+    if ROOT_DIR not in sys.path:
+        sys.path.insert(0, ROOT_DIR)
+    from app.model_scoring import model_scoring_bp
+    app.register_blueprint(model_scoring_bp)
     app.run(debug=True, port=5001, host='0.0.0.0')

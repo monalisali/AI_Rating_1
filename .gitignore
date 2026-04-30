@@ -3,3 +3,4 @@ logs/
 uploads/
 __pycache__/
 *.pyc
+bge_m3_cache/

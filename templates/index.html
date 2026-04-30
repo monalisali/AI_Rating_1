@@ -532,6 +532,20 @@
             background: var(--pwc-orange);
         }
 
+        .copy-btn {
+            margin-left: auto;
+            background: transparent;
+            border: 1px solid var(--pwc-gray-4);
+            color: var(--pwc-gray-2);
+            font-size: 11px;
+            padding: 2px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .copy-btn:hover { color: var(--pwc-orange); border-color: var(--pwc-orange); }
+        .copy-btn.copied { color: var(--pwc-green); border-color: var(--pwc-green); }
+
         .detail-section-body {
             padding: 14px 16px;
             font-size: 13px;
@@ -832,6 +846,7 @@
         <div class="tab-nav">
             <button class="tab-btn active" data-tab="batch">批量评估</button>
             <button class="tab-btn" data-tab="quick">快速评分</button>
+            <button class="tab-btn" data-tab="model">模型打分</button>
         </div>
     </div>
     <div class="accent-stripe"></div>
@@ -958,15 +973,15 @@
 
                 <div class="quick-form">
                     <div class="quick-field">
-                        <label>问题 <span class="required">*</span></label>
+                        <label>问题 <span class="required">*</span> <button class="copy-btn" onclick="copySection(this, document.getElementById('quickQuestion').value)" style="font-size:11px;margin-left:8px;">复制</button></label>
                         <textarea id="quickQuestion" rows="4" placeholder="请输入问题内容..."></textarea>
                     </div>
                     <div class="quick-field">
-                        <label>AI回答 <span class="required">*</span></label>
+                        <label>AI回答 <span class="required">*</span> <button class="copy-btn" onclick="copySection(this, document.getElementById('quickAiAnswer').value)" style="font-size:11px;margin-left:8px;">复制</button></label>
                         <textarea id="quickAiAnswer" rows="6" placeholder="请输入AI的回答内容..."></textarea>
                     </div>
                     <div class="quick-field">
-                        <label>建议回答（参考答案） <span class="required">*</span></label>
+                        <label>建议回答（参考答案） <span class="required">*</span> <button class="copy-btn" onclick="copySection(this, document.getElementById('quickRefAnswer').value)" style="font-size:11px;margin-left:8px;">复制</button></label>
                         <textarea id="quickRefAnswer" rows="6" placeholder="请输入建议的标准回答内容..."></textarea>
                     </div>
 
@@ -985,6 +1000,95 @@
 
         </div><!-- end #tabQuick -->
 
+        <!-- Tab: Model Scoring -->
+        <div id="tabModel" style="display:none;">
+
+            <div class="card">
+                <div class="card-title">模型打分</div>
+                <p style="color:var(--pwc-gray-2);font-size:13px;margin-bottom:18px;">
+                    上传Excel文件，A列=问题，B列=提示词，C列=建议回答。每道题使用各自的提示词调用AI并评分，不做任何提示词优化。
+                </p>
+
+                <!-- Upload -->
+                <div class="upload-area" id="modelUploadArea" style="margin-bottom:16px;">
+                    <div class="upload-icon">
+                        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#D04A02" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                    </div>
+                    <div class="upload-text">
+                        <strong>点击上传</strong> 或拖拽 Excel 文件到此处
+                        <br>
+                        <small>支持 .xlsx 格式 | A列=问题 | B列=提示词 | C列=建议回答</small>
+                    </div>
+                    <input type="file" id="modelFileInput" accept=".xlsx,.xls">
+                </div>
+
+                <div class="file-info" id="modelFileInfo">
+                    <h3>文件信息</h3>
+                    <p><strong>文件名：</strong><span id="modelFileName"></span></p>
+                    <p><strong>问题数量：</strong><span id="modelQuestionCount"></span> 个</p>
+                    <div class="questions-preview" id="modelQuestionsPreview"></div>
+                </div>
+            </div>
+
+            <!-- Settings -->
+            <div class="card" id="modelOptionsArea" style="display:none;">
+                <div class="card-title">打分配置</div>
+                <div class="options">
+                    <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;">
+                        <div>
+                            <span>循环次数：</span>
+                            <input type="number" id="modelRounds" value="1" min="1" max="10"
+                                style="width:60px;padding:4px 8px;border:1px solid var(--pwc-gray-4);border-radius:3px;font-size:14px;text-align:center;">
+                        </div>
+                        <div class="thread-options">
+                            <span>并发线程数：</span>
+                            <label><input type="radio" name="modelThreadCount" value="2" checked> 2</label>
+                            <label><input type="radio" name="modelThreadCount" value="4"> 4</label>
+                            <label><input type="radio" name="modelThreadCount" value="6"> 6</label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="error-message" id="modelError"></div>
+
+                <div class="progress-container" id="modelProgressContainer">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="modelProgressFill">0%</div>
+                    </div>
+                    <div class="progress-text" id="modelProgressText">正在处理中...</div>
+                </div>
+
+                <div class="buttons">
+                    <button class="btn btn-primary" id="modelProcessBtn" disabled>开始打分</button>
+                </div>
+            </div>
+
+            <!-- Results -->
+            <div class="card" id="modelResultsCard" style="display:none;">
+                <div class="card-title">打分结果</div>
+                <div class="results-layout" id="modelResultsLayout">
+                    <div class="results-sidebar" id="modelResultsSidebar"></div>
+                    <div class="results-detail" id="modelResultsDetail">
+                        <div class="detail-empty">点击左侧问题查看详情</div>
+                    </div>
+                </div>
+
+                <div class="summary-stats" id="modelSummaryStats">
+                    <div class="summary-title">整体评估统计</div>
+                    <div class="summary-grid" id="modelSummaryGrid"></div>
+                </div>
+
+                <div class="download-section" id="modelDownloadSection">
+                    <button class="btn btn-success" id="modelDownloadBtn">下载 Excel</button>
+                </div>
+            </div>
+
+        </div><!-- end #tabModel -->
+
     </div>
 
     <div class="footer">&copy; 2026 PwC. All rights reserved.</div>
@@ -996,6 +1100,7 @@
             document.querySelector(`.tab-btn[data-tab="${tabName}"]`).classList.add('active');
             document.getElementById('tabBatch').style.display = tabName === 'batch' ? '' : 'none';
             document.getElementById('tabQuick').style.display = tabName === 'quick' ? '' : 'none';
+            document.getElementById('tabModel').style.display = tabName === 'model' ? '' : 'none';
         }
         document.querySelectorAll('.tab-btn').forEach(btn => {
             btn.addEventListener('click', () => switchTab(btn.dataset.tab));
@@ -1260,6 +1365,30 @@
             resultsSidebar.appendChild(div);
         }
 
+        function copySection(btn, text) {
+            // text可能来自 data-copy-idx 查找，也可能直接传入
+            if (typeof text === 'undefined') {
+                const el = btn.closest('.detail-section');
+                const idx = btn.dataset.copyIdx;
+                const field = btn.dataset.copyField;
+                // 从对应的结果数组中取值
+                const arr = btn.closest('#tabModel') ? modelAllResults : allResults;
+                const r = arr[parseInt(idx)];
+                if (r) text = r[field] || '';
+                else text = '';
+            }
+            navigator.clipboard.writeText(text).then(() => {
+                btn.textContent = '已复制';
+                btn.classList.add('copied');
+                setTimeout(() => { btn.textContent = '复制'; btn.classList.remove('copied'); }, 1500);
+            });
+        }
+
+        function copyBtn(idx, field) {
+            // 返回复制按钮HTML，通过data属性传递索引和字段名，不内嵌文本
+            return `<button class="copy-btn" data-copy-idx="${idx}" data-copy-field="${field}" onclick="copySection(this)">复制</button>`;
+        }
+
         function showDetail(idx) {
             const r = allResults[idx];
             if (!r) return;
@@ -1274,15 +1403,15 @@
             resultsDetail.innerHTML = `
                 <div class="detail-content">
                     <div class="detail-section">
-                        <div class="detail-section-header"><span class="dot"></span>问题</div>
+                        <div class="detail-section-header"><span class="dot"></span>问题${copyBtn(idx, 'question')}</div>
                         <div class="detail-section-body">${escapeHtml(r.question)}</div>
                     </div>
                     <div class="detail-section">
-                        <div class="detail-section-header"><span class="dot"></span>AI回答</div>
+                        <div class="detail-section-header"><span class="dot"></span>AI回答${copyBtn(idx, 'answer')}</div>
                         <div class="detail-section-body">${escapeHtml(r.answer)}</div>
                     </div>
                     ${r.reference_answer ? `<div class="detail-section">
-                        <div class="detail-section-header"><span class="dot"></span>建议答案</div>
+                        <div class="detail-section-header"><span class="dot"></span>建议答案${copyBtn(idx, 'reference_answer')}</div>
                         <div class="detail-section-body">${escapeHtml(r.reference_answer)}</div>
                     </div>` : ''}
                     ${scoresHtml}
@@ -1459,6 +1588,281 @@
                     <span class="value" style="color:${totalColor};">${total}/100</span>
                 </div>`;
         }
+
+        // ===== Model Scoring =====
+        let modelUploadedFilename = null;
+        let modelOutputXlsx = null;
+        let modelAllResults = [];
+
+        const modelUploadArea = document.getElementById('modelUploadArea');
+        const modelFileInput = document.getElementById('modelFileInput');
+        const modelOptionsArea = document.getElementById('modelOptionsArea');
+        const modelProcessBtn = document.getElementById('modelProcessBtn');
+        const modelProgressContainer = document.getElementById('modelProgressContainer');
+        const modelProgressFill = document.getElementById('modelProgressFill');
+        const modelProgressText = document.getElementById('modelProgressText');
+        const modelResultsCard = document.getElementById('modelResultsCard');
+        const modelResultsSidebar = document.getElementById('modelResultsSidebar');
+        const modelResultsDetail = document.getElementById('modelResultsDetail');
+        const modelDownloadSection = document.getElementById('modelDownloadSection');
+        const modelDownloadBtn = document.getElementById('modelDownloadBtn');
+        const modelSummaryStats = document.getElementById('modelSummaryStats');
+        const modelSummaryGrid = document.getElementById('modelSummaryGrid');
+        const modelError = document.getElementById('modelError');
+
+        // Upload
+        modelUploadArea.addEventListener('click', () => modelFileInput.click());
+        modelUploadArea.addEventListener('dragover', (e) => { e.preventDefault(); modelUploadArea.classList.add('dragover'); });
+        modelUploadArea.addEventListener('dragleave', () => modelUploadArea.classList.remove('dragover'));
+        modelUploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            modelUploadArea.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) handleModelFile(e.dataTransfer.files[0]);
+        });
+        modelFileInput.addEventListener('change', (e) => { if (e.target.files.length > 0) handleModelFile(e.target.files[0]); });
+
+        function handleModelFile(file) {
+            modelError.classList.remove('show');
+            hideModelResults();
+            const formData = new FormData();
+            formData.append('file', file);
+            fetch('/model_scoring_upload', { method: 'POST', body: formData })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    modelError.textContent = data.error;
+                    modelError.classList.add('show');
+                } else {
+                    modelUploadedFilename = data.filename;
+                    document.getElementById('modelFileName').textContent = data.filename;
+                    document.getElementById('modelQuestionCount').textContent = data.question_count;
+                    const preview = document.getElementById('modelQuestionsPreview');
+                    preview.innerHTML = data.questions.map(q =>
+                        `<div class="question-item"><strong>行${q.row}:</strong> ${escapeHtml(q.question.substring(0, 60))}${q.question.length > 60 ? '...' : ''} ${q.has_prompt ? '<span style="color:#2A9D8F;">[有提示词]</span>' : '<span style="color:#CB333B;">[无提示词]</span>'} ${q.has_reference ? '<span style="color:#2A9D8F;">[有参考答案]</span>' : ''}</div>`
+                    ).join('');
+                    document.getElementById('modelFileInfo').classList.add('show');
+                    modelProcessBtn.disabled = false;
+                    modelOptionsArea.style.display = 'block';
+                }
+            })
+            .catch(err => {
+                modelError.textContent = '上传失败: ' + err.message;
+                modelError.classList.add('show');
+            });
+        }
+
+        function hideModelResults() {
+            modelResultsCard.style.display = 'none';
+            modelDownloadSection.classList.remove('show');
+            modelSummaryStats.classList.remove('show');
+            modelSummaryGrid.innerHTML = '';
+            modelResultsSidebar.innerHTML = '';
+            modelResultsDetail.innerHTML = '<div class="detail-empty">点击左侧问题查看详情</div>';
+            modelAllResults = [];
+        }
+
+        // Process
+        modelProcessBtn.addEventListener('click', () => {
+            if (!modelUploadedFilename) return;
+            modelProcessBtn.disabled = true;
+            modelProcessBtn.innerHTML = '<span class="loading-spinner"></span>处理中...';
+            modelProgressContainer.classList.add('show');
+            modelProgressFill.style.width = '0%';
+            modelProgressFill.textContent = '0%';
+            modelProgressText.textContent = '正在处理中...';
+            hideModelResults();
+            modelError.classList.remove('show');
+            modelResultsCard.style.display = 'block';
+
+            const rounds = parseInt(document.getElementById('modelRounds').value) || 1;
+            const threadCount = document.querySelector('input[name="modelThreadCount"]:checked').value;
+
+            fetch('/model_scoring_process', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    filename: modelUploadedFilename,
+                    rounds: rounds,
+                    thread_count: parseInt(threadCount)
+                })
+            })
+            .then(response => {
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let currentRound = 1;
+                let roundCompleted = 0;
+
+                function handleModelEvent(data) {
+                    if (data.type === 'progress') {
+                        if (data.round !== currentRound) {
+                            currentRound = data.round;
+                            roundCompleted = 0;
+                        }
+                        roundCompleted = data.current;
+                        const totalAll = data.total * rounds;
+                        const doneAll = (currentRound - 1) * data.total + roundCompleted;
+                        const pct = Math.round(doneAll / totalAll * 100);
+                        modelProgressFill.style.width = pct + '%';
+                        modelProgressFill.textContent = pct + '%';
+                        modelProgressText.textContent = `第${currentRound}/${rounds}轮 — 正在处理第 ${data.current}/${data.total} 题 (${threadCount}线程)...`;
+                        addModelResult(data.result, currentRound);
+                    } else if (data.type === 'complete') {
+                        modelOutputXlsx = data.output_filename;
+                        modelProgressFill.style.width = '100%';
+                        modelProgressFill.textContent = '100%';
+                        modelProgressText.textContent = '处理完成';
+                        modelDownloadSection.classList.add('show');
+                        showModelSummary();
+                        finishModelProcess();
+                        const firstItem = modelResultsSidebar.querySelector('.sidebar-item');
+                        if (firstItem) firstItem.click();
+                    } else if (data.type === 'error') {
+                        modelError.textContent = data.message;
+                        modelError.classList.add('show');
+                        finishModelProcess();
+                    }
+                }
+
+                function processBuffer() {
+                    while (true) {
+                        const idx = buffer.indexOf('\n\n');
+                        if (idx === -1) break;
+                        const block = buffer.substring(0, idx);
+                        buffer = buffer.substring(idx + 2);
+                        for (const line of block.split('\n')) {
+                            if (line.startsWith('data: ')) { try { handleModelEvent(JSON.parse(line.substring(6))); } catch(e) {} }
+                        }
+                    }
+                }
+
+                function read() {
+                    reader.read().then(({ done, value }) => {
+                        if (done) { processBuffer(); finishModelProcess(); return; }
+                        buffer += decoder.decode(value, { stream: true });
+                        processBuffer();
+                        read();
+                    });
+                }
+                read();
+            }).catch(err => {
+                modelError.textContent = '处理失败: ' + err.message;
+                modelError.classList.add('show');
+                finishModelProcess();
+            });
+        });
+
+        function finishModelProcess() {
+            modelProcessBtn.disabled = false;
+            modelProcessBtn.innerHTML = '开始打分';
+            modelProgressContainer.classList.remove('show');
+        }
+
+        function addModelResult(r, roundNum) {
+            modelAllResults.push({ ...r, round: roundNum });
+
+            const idx = modelAllResults.length;
+            const total = r.scores && r.scores.success ? r.scores.total_score : null;
+            let badgeHtml = '';
+            if (total !== null) {
+                const cls = total >= 80 ? 'high' : total >= 50 ? 'mid' : 'low';
+                badgeHtml = `<span class="sidebar-score-badge ${cls}">${total}/100</span>`;
+            } else if (!r.success) {
+                badgeHtml = `<span class="sidebar-score-badge fail">失败</span>`;
+            }
+
+            const div = document.createElement('div');
+            div.className = `sidebar-item ${r.success ? '' : 'error'}`;
+            div.dataset.idx = idx - 1;
+            div.innerHTML = `
+                <div class="sidebar-num">R${roundNum} 第${r.row}行</div>
+                <div class="sidebar-question">${escapeHtml(r.question.substring(0, 50))}${r.question.length > 50 ? '...' : ''}</div>
+                ${badgeHtml}
+            `;
+            div.addEventListener('click', () => showModelDetail(parseInt(div.dataset.idx)));
+            modelResultsSidebar.appendChild(div);
+        }
+
+        function showModelDetail(idx) {
+            const r = modelAllResults[idx];
+            if (!r) return;
+
+            modelResultsSidebar.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+            const activeEl = modelResultsSidebar.querySelector(`.sidebar-item[data-idx="${idx}"]`);
+            if (activeEl) activeEl.classList.add('active');
+
+            const scoresHtml = r.scores ? buildScoresHtml(r.scores) : '';
+
+            modelResultsDetail.innerHTML = `
+                <div class="detail-content">
+                    <div class="detail-section">
+                        <div class="detail-section-header"><span class="dot"></span>问题 (第${r.round}轮)${copyBtn(idx, 'question')}</div>
+                        <div class="detail-section-body">${escapeHtml(r.question)}</div>
+                    </div>
+                    <div class="detail-section">
+                        <div class="detail-section-header"><span class="dot"></span>AI回答${copyBtn(idx, 'answer')}</div>
+                        <div class="detail-section-body">${escapeHtml(r.answer)}</div>
+                    </div>
+                    ${r.reference_answer ? `<div class="detail-section">
+                        <div class="detail-section-header"><span class="dot"></span>建议答案${copyBtn(idx, 'reference_answer')}</div>
+                        <div class="detail-section-body">${escapeHtml(r.reference_answer)}</div>
+                    </div>` : ''}
+                    <div class="detail-section">
+                        <div class="detail-section-header"><span class="dot"></span>使用的提示词${copyBtn(idx, 'prompt_used')}</div>
+                        <div class="detail-section-body" style="font-size:12px;color:var(--pwc-gray-1);">${escapeHtml(r.prompt_used || '')}</div>
+                    </div>
+                    ${scoresHtml}
+                </div>
+            `;
+            modelResultsDetail.scrollTop = 0;
+        }
+
+        function showModelSummary() {
+            const scored = modelAllResults.filter(r => r.scores && r.scores.success);
+            if (scored.length === 0) return;
+
+            const n = scored.length;
+            const avg = (key) => (scored.reduce((s, r) => s + (r.scores[key] || 0), 0) / n).toFixed(1);
+            const avgTotal = avg('total_score');
+            const avgAccuracy = avg('accuracy_score');
+            const avgCitation = avg('citation_score');
+            const avgSummary = avg('summary_score');
+
+            const color = v => v >= 80 ? '#2A9D8F' : v >= 50 ? '#D04A02' : '#CB333B';
+
+            modelSummaryGrid.innerHTML = `
+                <div class="summary-item">
+                    <div class="label">总题数</div>
+                    <div class="value" style="color:white;">${modelAllResults.length}</div>
+                    <div class="label" style="margin-top:2px;">已评分 ${n} 题</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">平均总分</div>
+                    <div class="value" style="color:${color(parseFloat(avgTotal))};">${avgTotal}</div>
+                    <div class="label" style="margin-top:2px;">/ 100</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">答案准确性</div>
+                    <div class="value" style="color:${color(parseFloat(avgAccuracy) / 60 * 100)};">${avgAccuracy}</div>
+                    <div class="label" style="margin-top:2px;">/ 60</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">法条援引度</div>
+                    <div class="value" style="color:${color(parseFloat(avgCitation) / 20 * 100)};">${avgCitation}</div>
+                    <div class="label" style="margin-top:2px;">/ 20</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">总结完整度</div>
+                    <div class="value" style="color:${color(parseFloat(avgSummary) / 20 * 100)};">${avgSummary}</div>
+                    <div class="label" style="margin-top:2px;">/ 20</div>
+                </div>
+            `;
+            modelSummaryStats.classList.add('show');
+        }
+
+        modelDownloadBtn.addEventListener('click', () => {
+            if (modelOutputXlsx) window.location.href = '/download/' + modelOutputXlsx;
+        });
     </script>
 </body>
 </html>
