@@ -37,6 +37,7 @@ import re
 import json
 import ssl
 import logging
+import sys
 import urllib.request
 import queue
 from datetime import datetime
@@ -63,7 +64,7 @@ _file_handler.setLevel(logging.INFO)
 _file_handler.setFormatter(_log_fmt)
 logger.addHandler(_file_handler)
 
-_console_handler = logging.StreamHandler()
+_console_handler = logging.StreamHandler(sys.stdout)
 _console_handler.setLevel(logging.INFO)
 _console_handler.setFormatter(_log_fmt)
 logger.addHandler(_console_handler)
@@ -1445,4 +1446,6 @@ if __name__ == '__main__':
         sys.path.insert(0, ROOT_DIR)
     from app.model_scoring import model_scoring_bp
     app.register_blueprint(model_scoring_bp)
+    from app.answer_stability import stability_bp
+    app.register_blueprint(stability_bp)
     app.run(debug=True, port=5001, host='0.0.0.0')

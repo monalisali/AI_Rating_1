@@ -847,6 +847,7 @@
             <button class="tab-btn active" data-tab="batch">批量评估</button>
             <button class="tab-btn" data-tab="quick">快速评分</button>
             <button class="tab-btn" data-tab="model">模型打分</button>
+            <button class="tab-btn" data-tab="stability">回答稳定性</button>
         </div>
     </div>
     <div class="accent-stripe"></div>
@@ -1089,6 +1090,84 @@
 
         </div><!-- end #tabModel -->
 
+        <!-- Tab: Answer Stability -->
+        <div id="tabStability" style="display:none;">
+
+            <div class="card">
+                <div class="card-title">回答稳定性</div>
+                <p style="color:var(--pwc-gray-2);font-size:13px;margin-bottom:18px;">
+                    上传Excel（A列=问题，B列=提示词），通过四Skill并行处理+动态提示词组装，提升AI回答稳定性。
+                </p>
+
+                <!-- Upload -->
+                <div class="upload-area" id="stabilityUploadArea" style="margin-bottom:16px;">
+                    <div class="upload-icon">
+                        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#D04A02" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                    </div>
+                    <div class="upload-text">
+                        <strong>点击上传</strong> 或拖拽 Excel 文件到此处
+                        <br>
+                        <small>支持 .xlsx 格式 | A列=问题 | B列=提示词 | <span style="color:#CB333B;">C列=文章内容（可选，有值时不会用B列提示词去调用AI获取文章内容）</span></small>
+                    </div>
+                    <input type="file" id="stabilityFileInput" accept=".xlsx,.xls">
+                </div>
+
+                <div class="file-info" id="stabilityFileInfo">
+                    <h3>文件信息</h3>
+                    <p><strong>文件名：</strong><span id="stabilityFileName"></span></p>
+                    <p><strong>问题数量：</strong><span id="stabilityQuestionCount"></span> 个</p>
+                    <div class="questions-preview" id="stabilityQuestionsPreview"></div>
+                </div>
+            </div>
+
+            <!-- Settings -->
+            <div class="card" id="stabilityOptionsArea" style="display:none;">
+                <div class="card-title">处理配置</div>
+                <div class="options">
+                    <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;">
+                        <div class="thread-options">
+                            <span>并发线程数：</span>
+                            <label><input type="radio" name="stabilityThreadCount" value="2" checked> 2</label>
+                            <label><input type="radio" name="stabilityThreadCount" value="4"> 4</label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="error-message" id="stabilityError"></div>
+
+                <div class="progress-container" id="stabilityProgressContainer">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="stabilityProgressFill">0%</div>
+                    </div>
+                    <div class="progress-text" id="stabilityProgressText">正在处理中...</div>
+                </div>
+
+                <div class="buttons">
+                    <button class="btn btn-primary" id="stabilityProcessBtn" disabled>开始处理</button>
+                </div>
+            </div>
+
+            <!-- Results -->
+            <div class="card" id="stabilityResultsCard" style="display:none;">
+                <div class="card-title">处理结果</div>
+                <div class="results-layout" id="stabilityResultsLayout">
+                    <div class="results-sidebar" id="stabilityResultsSidebar"></div>
+                    <div class="results-detail" id="stabilityResultsDetail">
+                        <div class="detail-empty">点击左侧问题查看详情</div>
+                    </div>
+                </div>
+
+                <div class="download-section" id="stabilityDownloadSection">
+                    <button class="btn btn-success" id="stabilityDownloadBtn">下载 Excel</button>
+                </div>
+            </div>
+
+        </div><!-- end #tabStability -->
+
     </div>
 
     <div class="footer">&copy; 2026 PwC. All rights reserved.</div>
@@ -1101,6 +1180,7 @@
             document.getElementById('tabBatch').style.display = tabName === 'batch' ? '' : 'none';
             document.getElementById('tabQuick').style.display = tabName === 'quick' ? '' : 'none';
             document.getElementById('tabModel').style.display = tabName === 'model' ? '' : 'none';
+            document.getElementById('tabStability').style.display = tabName === 'stability' ? '' : 'none';
         }
         document.querySelectorAll('.tab-btn').forEach(btn => {
             btn.addEventListener('click', () => switchTab(btn.dataset.tab));
@@ -1862,6 +1942,336 @@
 
         modelDownloadBtn.addEventListener('click', () => {
             if (modelOutputXlsx) window.location.href = '/download/' + modelOutputXlsx;
+        });
+
+        // ===== Answer Stability =====
+        let stabilityUploadedFilename = null;
+        let stabilityOutputXlsx = null;
+        let stabilityData = [];  // Array of {question, steps[], final_prompt, final_answer}
+
+        const stabilityUploadArea = document.getElementById('stabilityUploadArea');
+        const stabilityFileInput = document.getElementById('stabilityFileInput');
+        const stabilityOptionsArea = document.getElementById('stabilityOptionsArea');
+        const stabilityProcessBtn = document.getElementById('stabilityProcessBtn');
+        const stabilityProgressContainer = document.getElementById('stabilityProgressContainer');
+        const stabilityProgressFill = document.getElementById('stabilityProgressFill');
+        const stabilityProgressText = document.getElementById('stabilityProgressText');
+        const stabilityResultsCard = document.getElementById('stabilityResultsCard');
+        const stabilityResultsSidebar = document.getElementById('stabilityResultsSidebar');
+        const stabilityResultsDetail = document.getElementById('stabilityResultsDetail');
+        const stabilityDownloadSection = document.getElementById('stabilityDownloadSection');
+        const stabilityDownloadBtn = document.getElementById('stabilityDownloadBtn');
+        const stabilityError = document.getElementById('stabilityError');
+
+        // Upload
+        stabilityUploadArea.addEventListener('click', () => stabilityFileInput.click());
+        stabilityUploadArea.addEventListener('dragover', (e) => { e.preventDefault(); stabilityUploadArea.classList.add('dragover'); });
+        stabilityUploadArea.addEventListener('dragleave', () => stabilityUploadArea.classList.remove('dragover'));
+        stabilityUploadArea.addEventListener('drop', (e) => {
+            e.preventDefault(); stabilityUploadArea.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) handleStabilityFile(e.dataTransfer.files[0]);
+        });
+        stabilityFileInput.addEventListener('change', (e) => { if (e.target.files.length > 0) handleStabilityFile(e.target.files[0]); });
+
+        function handleStabilityFile(file) {
+            stabilityError.classList.remove('show');
+            hideStabilityResults();
+            const formData = new FormData();
+            formData.append('file', file);
+            fetch('/stability_upload', { method: 'POST', body: formData })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    stabilityError.textContent = data.error;
+                    stabilityError.classList.add('show');
+                } else {
+                    stabilityUploadedFilename = data.filename;
+                    document.getElementById('stabilityFileName').textContent = data.filename;
+                    document.getElementById('stabilityQuestionCount').textContent = data.question_count;
+                    const preview = document.getElementById('stabilityQuestionsPreview');
+                    preview.innerHTML = data.questions.map(q => {
+                        let tags = '';
+                        tags += q.has_prompt ? '<span style="color:#2A9D8F;">[有提示词]</span>' : '<span style="color:#CB333B;">[无提示词]</span>';
+                        if (q.has_articles) {
+                            tags += ` <span style="background:#FFF3CD;color:#856404;padding:2px 6px;border-radius:3px;font-size:12px;font-weight:bold;">[C列有${q.article_count}篇文章]</span>`;
+                        }
+                        return `<div class="question-item"><strong>行${q.row}:</strong> ${escapeHtml(q.question.substring(0, 60))}${q.question.length > 60 ? '...' : ''} ${tags}</div>`;
+                    }).join('');
+                    // 如果有任一题C列有值，显示高亮提示
+                    const hasAnyArticles = data.questions.some(q => q.has_articles);
+                    if (hasAnyArticles) {
+                        preview.innerHTML += '<div style="margin-top:10px;padding:8px 12px;background:#FFF3CD;border-left:4px solid #D04A02;color:#856404;font-size:13px;font-weight:bold;">如果C列有值，将不会根据[提示词]调用AI获取文章内容</div>';
+                    }
+                    document.getElementById('stabilityFileInfo').classList.add('show');
+                    stabilityProcessBtn.disabled = false;
+                    stabilityOptionsArea.style.display = 'block';
+                }
+            })
+            .catch(err => {
+                stabilityError.textContent = '上传失败: ' + err.message;
+                stabilityError.classList.add('show');
+            });
+        }
+
+        function hideStabilityResults() {
+            stabilityResultsCard.style.display = 'none';
+            stabilityDownloadSection.classList.remove('show');
+            stabilityResultsSidebar.innerHTML = '';
+            stabilityResultsDetail.innerHTML = '<div class="detail-empty">点击左侧问题查看详情</div>';
+            stabilityData = [];
+        }
+
+        // Process
+        stabilityProcessBtn.addEventListener('click', () => {
+            if (!stabilityUploadedFilename) return;
+            stabilityProcessBtn.disabled = true;
+            stabilityProcessBtn.innerHTML = '<span class="loading-spinner"></span>处理中...';
+            stabilityProgressContainer.classList.add('show');
+            stabilityProgressFill.style.width = '0%';
+            stabilityProgressFill.textContent = '0%';
+            stabilityProgressText.textContent = '正在处理中...';
+            hideStabilityResults();
+            stabilityError.classList.remove('show');
+            stabilityResultsCard.style.display = 'block';
+
+            const threadCount = document.querySelector('input[name="stabilityThreadCount"]:checked').value;
+
+            fetch('/stability_process', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename: stabilityUploadedFilename, thread_count: parseInt(threadCount) })
+            })
+            .then(response => {
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let totalQ = 0;
+                let currentQIdx = -1;
+                let currentSteps = [];
+
+                function handleStabilityEvent(data) {
+                    if (data.type === 'question_start') {
+                        totalQ = data.total_questions;
+                        currentQIdx = data.question_idx;
+                        currentSteps = [];
+                        stabilityData[data.question_idx] = {
+                            question: data.question,
+                            prompt: data.prompt,
+                            steps: currentSteps,
+                            final_prompt: '',
+                            final_answer: '',
+                            validation: null
+                        };
+                        const pct = Math.round((data.question_idx) / totalQ * 100);
+                        stabilityProgressFill.style.width = pct + '%';
+                        stabilityProgressFill.textContent = pct + '%';
+                        stabilityProgressText.textContent = `正在处理第 ${data.question_idx + 1}/${totalQ} 题...`;
+                        // Add to sidebar
+                        const div = document.createElement('div');
+                        div.className = 'sidebar-item';
+                        div.dataset.idx = data.question_idx;
+                        div.innerHTML = `
+                            <div class="sidebar-num">第 ${data.question_idx + 1} 题</div>
+                            <div class="sidebar-question">${escapeHtml(data.question.substring(0, 50))}${data.question.length > 50 ? '...' : ''}</div>
+                            <span class="sidebar-score-badge" style="background:#FFF3ED;color:#D04A02;">处理中</span>
+                        `;
+                        div.addEventListener('click', () => showStabilityDetail(parseInt(div.dataset.idx)));
+                        stabilityResultsSidebar.appendChild(div);
+                    }
+                    else if (data.type === 'step_start') {
+                        currentSteps.push({
+                            step_id: data.step_id,
+                            step_label: data.step_label,
+                            status: 'running',
+                            system_prompt: data.system_prompt || '',
+                            user_prompt: data.user_prompt || '',
+                            response: '', error: null
+                        });
+                    }
+                    else if (data.type === 'step_complete') {
+                        const step = currentSteps.find(s => s.step_id === data.step_id && s.status === 'running');
+                        if (step) {
+                            step.status = 'complete';
+                            step.response = data.response || '';
+                        }
+                    }
+                    else if (data.type === 'step_error') {
+                        const step = currentSteps.find(s => s.step_id === data.step_id && s.status === 'running');
+                        if (step) {
+                            step.status = 'error';
+                            step.error = data.error || '未知错误';
+                        }
+                    }
+                    else if (data.type === 'validation') {
+                        if (stabilityData[data.question_idx]) {
+                            stabilityData[data.question_idx].validation = data;
+                        }
+                    }
+                    else if (data.type === 'final_prompt') {
+                        if (stabilityData[data.question_idx]) {
+                            stabilityData[data.question_idx].final_prompt = data.prompt;
+                        }
+                    }
+                    else if (data.type === 'question_complete') {
+                        const qd = stabilityData[data.question_idx];
+                        if (qd) {
+                            qd.final_answer = data.answer;
+                            // Update sidebar badge
+                            const el = stabilityResultsSidebar.querySelector(`.sidebar-item[data-idx="${data.question_idx}"]`);
+                            if (el) {
+                                const badge = el.querySelector('.sidebar-score-badge');
+                                if (badge) {
+                                    badge.textContent = '完成';
+                                    badge.style.background = '#E6F5F3';
+                                    badge.style.color = '#2A9D8F';
+                                }
+                            }
+                        }
+                    }
+                    else if (data.type === 'complete') {
+                        stabilityOutputXlsx = data.output_filename;
+                        stabilityProgressFill.style.width = '100%';
+                        stabilityProgressFill.textContent = '100%';
+                        stabilityProgressText.textContent = '处理完成';
+                        stabilityDownloadSection.classList.add('show');
+                        finishStabilityProcess();
+                        const firstItem = stabilityResultsSidebar.querySelector('.sidebar-item');
+                        if (firstItem) firstItem.click();
+                    }
+                    else if (data.type === 'error') {
+                        stabilityError.textContent = data.message;
+                        stabilityError.classList.add('show');
+                        finishStabilityProcess();
+                    }
+                }
+
+                function processBuffer() {
+                    while (true) {
+                        const idx = buffer.indexOf('\n\n');
+                        if (idx === -1) break;
+                        const block = buffer.substring(0, idx);
+                        buffer = buffer.substring(idx + 2);
+                        for (const line of block.split('\n')) {
+                            if (line.startsWith('data: ')) { try { handleStabilityEvent(JSON.parse(line.substring(6))); } catch(e) {} }
+                        }
+                    }
+                }
+
+                function read() {
+                    reader.read().then(({ done, value }) => {
+                        if (done) { processBuffer(); finishStabilityProcess(); return; }
+                        buffer += decoder.decode(value, { stream: true });
+                        processBuffer();
+                        read();
+                    });
+                }
+                read();
+            }).catch(err => {
+                stabilityError.textContent = '处理失败: ' + err.message;
+                stabilityError.classList.add('show');
+                finishStabilityProcess();
+            });
+        });
+
+        function finishStabilityProcess() {
+            stabilityProcessBtn.disabled = false;
+            stabilityProcessBtn.innerHTML = '开始处理';
+            stabilityProgressContainer.classList.remove('show');
+        }
+
+        function showStabilityDetail(idx) {
+            const d = stabilityData[idx];
+            if (!d) return;
+
+            stabilityResultsSidebar.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+            const activeEl = stabilityResultsSidebar.querySelector(`.sidebar-item[data-idx="${idx}"]`);
+            if (activeEl) activeEl.classList.add('active');
+
+            // Build steps HTML
+            let stepsHtml = '';
+            for (const step of d.steps) {
+                const statusIcon = step.status === 'complete' ? '<span style="color:#2A9D8F;">&#10003;</span>'
+                    : step.status === 'error' ? '<span style="color:#CB333B;">&#10007;</span>'
+                    : '<span style="color:#D04A02;">&#9679;</span>';
+                const statusColor = step.status === 'complete' ? '#2A9D8F' : step.status === 'error' ? '#CB333B' : '#D04A02';
+
+                stepsHtml += `<div class="detail-section">
+                    <div class="detail-section-header" style="cursor:pointer;" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
+                        <span class="dot" style="background:${statusColor};"></span>${statusIcon} ${escapeHtml(step.step_label)}
+                        <span style="font-size:11px;color:var(--pwc-gray-2);margin-left:auto;">点击展开/收起</span>
+                    </div>
+                    <div class="detail-section-body" style="display:none;">`;
+                if (step.system_prompt) {
+                    stepsHtml += `<div style="margin-bottom:10px;"><strong style="color:var(--pwc-dark);font-size:12px;">系统提示词：</strong><pre style="white-space:pre-wrap;font-size:12px;color:var(--pwc-gray-1);margin-top:4px;background:var(--pwc-gray-5);padding:8px;border-radius:3px;">${escapeHtml(step.system_prompt)}</pre></div>`;
+                }
+                if (step.user_prompt) {
+                    stepsHtml += `<div style="margin-bottom:10px;"><strong style="color:var(--pwc-dark);font-size:12px;">用户提示词：</strong><pre style="white-space:pre-wrap;font-size:12px;color:var(--pwc-gray-1);margin-top:4px;background:var(--pwc-gray-5);padding:8px;border-radius:3px;max-height:200px;overflow-y:auto;">${escapeHtml(step.user_prompt.substring(0, 3000))}${step.user_prompt.length > 3000 ? '...(截断)' : ''}</pre></div>`;
+                }
+                if (step.response) {
+                    stepsHtml += `<div style="margin-bottom:6px;"><strong style="color:var(--pwc-dark);font-size:12px;">AI响应：</strong><pre style="white-space:pre-wrap;font-size:12px;color:var(--pwc-gray-1);margin-top:4px;background:white;padding:8px;border:1px solid var(--pwc-gray-4);border-radius:3px;max-height:300px;overflow-y:auto;">${escapeHtml(step.response.substring(0, 5000))}${step.response.length > 5000 ? '...(截断)' : ''}</pre></div>`;
+                }
+                if (step.error) {
+                    stepsHtml += `<div style="color:#CB333B;font-size:12px;">错误: ${escapeHtml(step.error)}</div>`;
+                }
+                stepsHtml += `</div></div>`;
+            }
+
+            // Validation
+            let validationHtml = '';
+            if (d.validation) {
+                validationHtml = `<div class="detail-section">
+                    <div class="detail-section-header"><span class="dot" style="background:var(--pwc-teal);"></span>规则校验结果</div>
+                    <div class="detail-section-body" style="font-size:12px;">
+                        原始断言: ${d.validation.original_count} 条 → 清洗后: ${d.validation.cleaned_count} 条（移除 ${d.validation.removed_count} 条）
+                    </div>
+                </div>`;
+            }
+
+            // Final prompt
+            let finalPromptHtml = '';
+            if (d.final_prompt) {
+                finalPromptHtml = `<div class="detail-section">
+                    <div class="detail-section-header" style="cursor:pointer;" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
+                        <span class="dot" style="background:var(--pwc-orange);"></span>最终组装的提示词
+                        <span style="font-size:11px;color:var(--pwc-gray-2);margin-left:auto;">点击展开/收起</span>
+                    </div>
+                    <div class="detail-section-body" style="display:none;max-height:400px;overflow-y:auto;">
+                        <pre style="white-space:pre-wrap;font-size:12px;color:var(--pwc-gray-1);">${escapeHtml(d.final_prompt)}</pre>
+                    </div>
+                </div>`;
+            }
+
+            // Final answer
+            let finalAnswerHtml = '';
+            if (d.final_answer) {
+                finalAnswerHtml = `<div class="detail-section">
+                    <div class="detail-section-header" style="background:#E6F5F3;"><span class="dot" style="background:#2A9D8F;"></span>最终AI回答</div>
+                    <div class="detail-section-body" style="max-height:500px;overflow-y:auto;">${escapeHtml(d.final_answer)}</div>
+                </div>`;
+            }
+
+            stabilityResultsDetail.innerHTML = `
+                <div class="detail-content">
+                    <div class="detail-section">
+                        <div class="detail-section-header"><span class="dot"></span>问题</div>
+                        <div class="detail-section-body">${escapeHtml(d.question)}</div>
+                    </div>
+                    <div class="detail-section">
+                        <div class="detail-section-header" style="color:var(--pwc-gray-2);font-size:12px;">
+                            <span class="dot" style="background:var(--pwc-gray-2);"></span>处理步骤（共${d.steps.length}步，点击展开查看提示词和AI响应）
+                        </div>
+                        <div class="detail-section-body" style="padding:0;">${stepsHtml || '<div style="padding:12px;color:var(--pwc-gray-3);">等待处理...</div>'}</div>
+                    </div>
+                    ${validationHtml}
+                    ${finalPromptHtml}
+                    ${finalAnswerHtml}
+                </div>
+            `;
+            stabilityResultsDetail.scrollTop = 0;
+        }
+
+        stabilityDownloadBtn.addEventListener('click', () => {
+            if (stabilityOutputXlsx) window.location.href = '/download/' + stabilityOutputXlsx;
         });
     </script>
 </body>

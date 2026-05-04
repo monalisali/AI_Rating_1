@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from app.answer_stability import stability_bp; print\\('Import OK'\\)\")"
+    ]
+  }
+}
