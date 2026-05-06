@@ -871,17 +871,6 @@
             <textarea id="scoringPrompt" rows="10" placeholder="加载默认提示词中..."></textarea>
         </div>
 
-        <!-- Quick Score Jump -->
-        <div class="card" style="cursor:pointer;transition:box-shadow 0.2s;border-left:4px solid var(--pwc-orange);" id="jumpToQuickScore">
-            <div style="display:flex;align-items:center;justify-content:space-between;">
-                <div>
-                    <div style="font-size:16px;font-weight:600;color:var(--pwc-dark);">快速评分</div>
-                    <div style="font-size:13px;color:var(--pwc-gray-2);margin-top:4px;">手动输入问题、AI回答和建议回答，直接评分</div>
-                </div>
-                <div style="font-size:22px;color:var(--pwc-orange);">&rarr;</div>
-            </div>
-        </div>
-
         <!-- Upload Card -->
         <div class="card">
             <div class="card-title">上传文件</div>
@@ -916,8 +905,13 @@
 
             <div class="options">
                 <label>
-                    <input type="checkbox" id="enableScoring">
-                    <span>启用语义对比打分（需要E列有建议答案）</span>
+                    <input type="checkbox" id="enableScoring" checked>
+                    <span>启用语义对比打分（需要E列有建议答案，不勾选则只获取AI回答不评分）</span>
+                </label>
+
+                <label id="enableOptimizeWrapper" style="margin-left:24px;">
+                    <input type="checkbox" id="enableOptimize">
+                    <span>启用提示词优化（不勾选则只评分不优化，内层只跑1次不重试）</span>
                 </label>
 
                 <div class="thread-options">
@@ -1185,7 +1179,6 @@
         document.querySelectorAll('.tab-btn').forEach(btn => {
             btn.addEventListener('click', () => switchTab(btn.dataset.tab));
         });
-        document.getElementById('jumpToQuickScore').addEventListener('click', () => switchTab('quick'));
 
         let uploadedFilename = null;
         let outputXlsx = null;
@@ -1227,7 +1220,9 @@
             });
 
         // 评分开关
-        enableScoring.addEventListener('change', () => {});
+        enableScoring.addEventListener('change', () => {
+            if (!enableScoring.checked) document.getElementById('enableOptimize').checked = false;
+        });
 
         // 恢复默认
         resetPromptBtn.addEventListener('click', () => {
@@ -1344,7 +1339,7 @@
 
             const scoringEnabled = enableScoring.checked;
             const threadCount = document.querySelector('input[name="threadCount"]:checked').value;
-            const requestBody = { filename: uploadedFilename, enable_scoring: scoringEnabled, thread_count: parseInt(threadCount) };
+            const requestBody = { filename: uploadedFilename, enable_scoring: scoringEnabled, enable_optimize: document.getElementById('enableOptimize').checked, thread_count: parseInt(threadCount) };
             if (scoringEnabled) requestBody.scoring_prompt = scoringPromptEl.value;
 
             let completedCount = 0;
