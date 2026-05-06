@@ -92,7 +92,7 @@ def _process_one_question(row_num, question, prompt, reference_answer, scoring_p
             'question': question,
             'answer': answer,
             'reference_answer': reference_answer,
-            'prompt_used': prompt[:200] + '...' if len(prompt) > 200 else prompt,
+            'prompt_used': prompt,
             'scores': scores,
             'success': True
         }
@@ -103,7 +103,7 @@ def _process_one_question(row_num, question, prompt, reference_answer, scoring_p
             'question': question,
             'answer': f'处理失败: {str(e)}',
             'reference_answer': reference_answer,
-            'prompt_used': prompt[:200] + '...' if len(prompt) > 200 else prompt,
+            'prompt_used': prompt,
             'scores': None,
             'success': False
         }
@@ -167,7 +167,7 @@ def model_scoring_process():
                             'row': row_num, 'question': question,
                             'answer': f'处理失败: {str(e)}',
                             'reference_answer': ref_answer,
-                            'prompt_used': prompt[:200] + '...' if len(prompt) > 200 else prompt,
+                            'prompt_used': prompt,
                             'scores': None, 'success': False
                         }
 
@@ -181,7 +181,7 @@ def model_scoring_process():
                         'row': row_num, 'question': question,
                         'answer': f'超时（>{timeout_per_question}秒），已跳过',
                         'reference_answer': ref_answer,
-                        'prompt_used': prompt[:200] + '...' if len(prompt) > 200 else prompt,
+                        'prompt_used': prompt,
                         'scores': None, 'success': False
                     })
                 else:
@@ -254,7 +254,7 @@ def _save_to_excel(all_round_results, output_path, model_name):
         ('问题', 50),
         ('AI回答', 100),
         ('建议答案', 80),
-        ('提示词(前200字)', 40),
+        ('提示词', 40),
         ('答案准确性(60分)', 12), ('答案准确性说明', 40),
         ('法条援引度(20分)', 12), ('法条援引度说明', 40),
         ('总结完整度(20分)', 12), ('总结完整度说明', 40),

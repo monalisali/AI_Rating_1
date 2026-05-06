@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \"from app.answer_stability import stability_bp; print\\('Import OK'\\)\")"
+      "Bash(python -c \"from app.answer_stability import stability_bp; print\\('Import OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('app/answer_stability.py', doraise=True\\); print\\('OK'\\)\")"
     ]
   }
 }

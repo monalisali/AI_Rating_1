@@ -60,89 +60,41 @@ def _get_articles_full(question: str, max_rounds: int = 12) -> list:
     return all_parts
 
 
-# ===================== Skill System Prompts =====================
+# ===================== Combined Skill Prompt =====================
 
-SKILL1_SYSTEM = """你是一个税务规则抽取专家。请从给定的文章中，抽取所有明确的"条件→结论"对。
+COMBINED_SKILL_SYSTEM = """你是一个税务多维度信息抽取专家。请从给定的用户问题和文章中，同时抽取以下四类信息，一次性输出。
 
-输出格式：JSON数组，每个对象必须包含：
-- condition: 触发条件（一句话，客观可判断）
-- conclusion: 对应的结论/规则
-- article_id: 输入的文章ID（原样输出）
+输出格式：一个JSON对象，包含以下四个字段：
 
-要求：
-1. 每条规则独立，不要合并多个条件。
-2. 如果文章包含例外或限制条件，需单独拆分为带否定的条件。
-3. 不要添加原文没有的信息。
-4. 如果文章无明确规则，输出空数组[]。
-5. 只输出JSON，不要其他解释。"""
+1. "condition_conclusion_pairs"：条件-结论对数组，每个对象包含：
+   - condition: 触发条件（一句话，客观可判断）
+   - conclusion: 对应的结论/规则
+   - article_ids: 来源文章ID列表（如["ART_44382"]）
+   要求：每条规则独立，不合并多个条件；例外或限制条件单独拆分；不要添加原文没有的信息。
 
-SKILL2_SYSTEM = """你是一个税务场景分类专家。给定用户问题和相关文章，请提取所有可能适用的政策场景标签。
+2. "policy_scenes"：政策场景标签数组，每个元素是一个简短标签（如"西部大开发优惠"）。
+   要求：标签来源于文章中的政策名称或常见税务术语；具有区分度，避免过于宽泛；不要遗漏。
 
-输出格式：JSON数组，每个元素是一个简短的场景标签（如"小微企业优惠"）。
+3. "concept_relations"：概念关系断言数组，每个对象包含：
+   - entity_a: 概念A名称
+   - entity_b: 概念B名称
+   - relation_type: 关系类型，严格限定为以下六种之一：
+     hypernym(A是B的下位), synonym(完全等价), related_not_equal(相关但不可等同),
+     mutually_exclusive(互斥不能同时适用), succession(B替代A可能带过渡期), property_of(A是B的属性)
+   - evidence: 原文证据（摘录1-2句）
+   - article_ids: 来源文章ID列表
+   要求：只抽取明确体现的关系，每条必须有原文证据；特别关注跨文章之间的概念关系（替代、等价、互斥等）。
 
-要求：
-1. 标签来源于文章中的政策名称或常见税务术语。
-2. 标签应具有区分度，避免过于宽泛（如"税收优惠"不可取，应细化为"西部大开发优惠"）。
-3. 不要遗漏文章中明确提到的场景。
-4. 只输出JSON数组，不要其他解释。"""
+4. "time_constraints"：时间约束数组，每个对象包含：
+   - policy_name: 政策名称或简称
+   - constraint_type: "valid_for"(适用) / "invalid_for"(不适用) / "transitional"(过渡期保留)
+   - condition: 具体条件描述
+   - article_ids: 来源文章ID列表
+   要求：只抽取明确的时间限定；政策废止但保留存量时拆分为invalid_for和transitional两条。
 
-SKILL3_SYSTEM = """你是一个税务概念关系抽取专家。请从给定的用户问题和文章中，抽取所有成对概念之间的逻辑关系。
-
-关系类型严格限定为以下六种（必须从列表中选）：
-- hypernym: A是B的一种（下位→上位）
-- synonym: A和B完全等价
-- related_not_equal: A和B相关但不可等同（警告模型不要划等号）
-- mutually_exclusive: A和B不能同时适用
-- succession: B替代A（可能带过渡期）
-- property_of: A是B的一个属性/参数
-
-要求：
-1. 每条断言必须提供原文证据（evidence字段，摘录原文1-2句）。
-2. 只抽取文章或问题中明确体现的关系，不要臆想。
-3. 输出JSON数组，即使没有关系也输出空数组[]。
-4. 不要输出其他解释。"""
-
-SKILL4_SYSTEM = """你是一个税务时间信息抽取专家。从文章中提取所有与政策适用时间相关的约束。
-
-输出格式：JSON数组，每个对象包含：
-- policy_name: 政策名称或简称
-- constraint_type: 枚举值 "valid_for"（适用条件）, "invalid_for"（不适用条件）, "transitional"（过渡期保留）
-- condition: 具体的条件描述（如"2010年12月31日前新办企业"）
-- article_id: 来源文章ID
-
-要求：
-1. 只抽取明确的时间限定，如"自X年X月X日起执行""停止执行""继续享受到期满"。
-2. 如果政策有废止但保留存量，拆分为两条：一条invalid_for（对新办企业），一条transitional（对存量）。
-3. 输出空数组若无时间信息。"""
-
-SKILL3_CROSS_SYSTEM = """你是一个税务概念关系发现专家。现在已从多篇文章中分别抽取了概念关系断言，请你综合分析这些断言，发现跨文章之间的概念关系。
-
-已有断言列表如下。请检查：
-1. 不同文章中的概念是否实际上是同一个概念（应补充synonym关系）
-2. 不同文章中的概念之间是否有上下位关系（hypernym）
-3. 是否存在跨文章的互斥或替代关系（mutually_exclusive / succession）
-
-用户问题：{question}
-
-关系类型严格限定为以下六种：
-- hypernym: A是B的一种（下位→上位）
-- synonym: A和B完全等价
-- related_not_equal: A和B相关但不可等同
-- mutually_exclusive: A和B不能同时适用
-- succession: B替代A（可能带过渡期）
-- property_of: A是B的一个属性/参数
-
-输出格式：JSON数组，每个对象包含：
-- entity_a: 概念A名称
-- entity_b: 概念B名称
-- relation_type: 关系类型
-- evidence: 推断依据（说明为什么认为这两个概念有此关系）
-
-要求：
-1. 只补充跨文章的新关系，不要重复已有断言。
-2. 每条断言必须说明推断依据。
-3. 输出JSON数组，若无新发现则输出空数组[]。
-4. 不要输出其他解释。"""
+如果某类信息不存在，输出空数组[]。
+特别要求：重点关注跨文章之间的关系——如果多篇文章涉及同一政策的不同阶段（如废止、替代、过渡期），务必在concept_relations和time_constraints中体现。
+只输出JSON，不要其他解释。"""
 
 FINAL_ANSWER_SYSTEM = "你是一个税务问答专家。请严格按以下结构和约束回答问题。"
 
@@ -227,6 +179,158 @@ def _call_llm(system_prompt, user_prompt, temperature=0.01, max_tokens=2000, tim
     raise RuntimeError("LLM调用失败")
 
 
+# ===================== BGE-M3 Embedding =====================
+
+_bge_model = None
+
+def _get_bge_model():
+    """懒加载BGE-M3本地模型"""
+    global _bge_model
+    if _bge_model is None:
+        from sentence_transformers import SentenceTransformer
+        model_path = os.path.join(ROOT_DIR, "bge_m3_cache", "Xorbits", "bge-m3")
+        _log(f"[stability] 正在加载BGE-M3模型（路径: {model_path}）...")
+        _bge_model = SentenceTransformer(model_path)
+        _log("[stability] BGE-M3模型加载完成")
+    return _bge_model
+
+
+def _generate_embedding(text):
+    """用BGE-M3生成文本向量"""
+    model = _get_bge_model()
+    emb = model.encode(text[:500], normalize_embeddings=True)
+    return emb.tolist()
+
+
+# ===================== Article Grouping =====================
+
+def _group_articles(article_parts, max_chars=None, sim_threshold=None):
+    """按BGE-M3向量相似度对文章分组
+
+    返回 list[list[str]]，每个内层列表是一组文章文本
+    """
+    import numpy as np
+
+    max_chars = max_chars or get_config('group_max_chars', 12000)
+    sim_threshold = sim_threshold or get_config('group_sim_threshold', 0.6)
+
+    if len(article_parts) <= 1:
+        return [article_parts] if article_parts else []
+
+    # 为每篇文章生成向量
+    article_data = []
+    for i, content in enumerate(article_parts):
+        vec = _generate_embedding(content)
+        article_data.append({'content': content, 'vec': vec, 'len': len(content)})
+    _log(f"[stability] 向量生成完成，共{len(article_data)}篇文章")
+
+    groups = []  # list of {'articles': [...], 'vecs': [...], 'total_len': int}
+
+    for art in article_data:
+        # 单篇超长：独立成组
+        if art['len'] > max_chars:
+            groups.append({'articles': [art], 'vecs': [art['vec']], 'total_len': art['len']})
+            continue
+
+        placed = False
+        for group in groups:
+            # 字符数检查
+            if group['total_len'] + art['len'] > max_chars:
+                continue
+            # 相似度检查：与组内已有文章的平均余弦相似度
+            sims = [float(np.dot(art['vec'], v)) for v in group['vecs']]
+            avg_sim = sum(sims) / len(sims)
+            if avg_sim >= sim_threshold:
+                group['articles'].append(art)
+                group['vecs'].append(art['vec'])
+                group['total_len'] += art['len']
+                placed = True
+                break
+
+        if not placed:
+            groups.append(
+                {'articles': [art], 'vecs': [art['vec']], 'total_len': art['len']}
+            )
+
+    # 提取文章文本
+    result = [[a['content'] for a in g['articles']] for g in groups]
+    return result
+
+
+# ===================== Merge Functions =====================
+
+def _merge_condition_pairs(all_pairs, sim_threshold=None):
+    """合并条件-结论对：语义相似度>=阈值则合并article_ids"""
+    import numpy as np
+
+    if not all_pairs:
+        return []
+
+    sim_threshold = sim_threshold or get_config('merge_cc_sim_threshold', 0.95)
+    merged = []
+    used_indices = set()
+
+    for i, pair in enumerate(all_pairs):
+        if i in used_indices:
+            continue
+        current = dict(pair)
+        ids = list(current.get('article_ids', current.get('article_id', [])))
+        if isinstance(ids, str):
+            ids = [ids]
+
+        for j in range(i + 1, len(all_pairs)):
+            if j in used_indices:
+                continue
+            other = all_pairs[j]
+            # 计算条件+结论的语义相似度
+            text_i = current.get('condition', '') + current.get('conclusion', '')
+            text_j = other.get('condition', '') + other.get('conclusion', '')
+            if text_i and text_j:
+                vec_i = _generate_embedding(text_i)
+                vec_j = _generate_embedding(text_j)
+                sim = float(np.dot(vec_i, vec_j))
+                if sim >= sim_threshold:
+                    other_ids = other.get('article_ids', other.get('article_id', []))
+                    if isinstance(other_ids, str):
+                        other_ids = [other_ids]
+                    ids.extend([x for x in other_ids if x not in ids])
+                    used_indices.add(j)
+
+        current['article_ids'] = ids
+        if 'article_id' in current:
+            del current['article_id']
+        merged.append(current)
+
+    return merged
+
+
+def _merge_time_constraints(all_constraints):
+    """合并时间约束：同policy+同type+同条件则合并article_ids"""
+    if not all_constraints:
+        return []
+
+    merged = []
+    seen = {}
+    for tc in all_constraints:
+        key = (tc.get('policy_name', ''), tc.get('constraint_type', ''), tc.get('condition', ''))
+        ids = list(tc.get('article_ids', tc.get('article_id', [])))
+        if isinstance(ids, str):
+            ids = [ids]
+        if key in seen:
+            idx = seen[key]
+            existing_ids = merged[idx].get('article_ids', [])
+            merged[idx]['article_ids'] = list(set(existing_ids + ids))
+        else:
+            seen[key] = len(merged)
+            item = dict(tc)
+            item['article_ids'] = ids
+            if 'article_id' in item:
+                del item['article_id']
+            merged.append(item)
+
+    return merged
+
+
 def _parse_json_response(text):
     """Extract JSON from LLM response"""
     if not text:
@@ -294,28 +398,6 @@ def _parse_articles_from_text(text):
         articles = [text.strip()]
 
     return articles
-
-
-def _merge_lists(list_of_lists):
-    """合并多个JSON数组，去除完全重复的项（按JSON序列化去重）"""
-    merged = []
-    seen_keys = set()
-    for lst in list_of_lists:
-        if not lst or not isinstance(lst, list):
-            continue
-        for item in lst:
-            if isinstance(item, dict):
-                key = json.dumps(item, sort_keys=True, ensure_ascii=False)
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    merged.append(item)
-            elif isinstance(item, str):
-                if item not in seen_keys:
-                    seen_keys.add(item)
-                    merged.append(item)
-            else:
-                merged.append(item)
-    return merged
 
 
 def _dedupe_strings(items):
@@ -444,7 +526,7 @@ def _assemble_final_prompt(user_query, condition_pairs, scene_enum, constraint_t
         scene_list = "未提取到政策场景"
 
     # Constraint texts
-    constraints = "\n".join(constraint_texts) if constraint_texts else "无特殊概念约束"
+    constraints = "\n".join(f"- {t}" for t in constraint_texts) if constraint_texts else "无特殊概念约束"
 
     # Time constraints
     if isinstance(time_constraints, list) and time_constraints:
@@ -465,8 +547,10 @@ def _assemble_final_prompt(user_query, condition_pairs, scene_enum, constraint_t
         for i, cc in enumerate(condition_pairs, 1):
             cond = cc.get('condition', '')
             conc = cc.get('conclusion', '')
-            aid = cc.get('article_id', '')
-            cc_lines.append(f"{i}. 条件：{cond}\n   结论：{conc}\n   来源：{aid}")
+            aids = cc.get('article_ids', cc.get('article_id', ''))
+            if isinstance(aids, list):
+                aids = ', '.join(str(a) for a in aids)
+            cc_lines.append(f"- 条件：{cond}\n  结论：{conc}\n  来源：{aids}")
         cc_text = "\n".join(cc_lines)
     else:
         cc_text = "未抽取到条件-结论对"
@@ -658,124 +742,140 @@ def stability_process():
                     articles_full_text = article_parts[0]
                     products['articles_text'] = articles_full_text
 
-            # ---- Step 2: Run skills (Phase 1: per-article) ----
-            # Skills 1/2/3/4: 全部逐篇调用
-            tasks = []
+            # ---- Step 2: Group articles + Combined Skill ----
+            # 2a: 分组（基于BGE-M3向量相似度）
+            max_chars = get_config('group_max_chars', 12000)
+            sim_threshold = get_config('group_sim_threshold', 0.6)
+            _log(f"[stability] row={row_num} 开始分组（max_chars={max_chars}, sim_threshold={sim_threshold}）")
+            yield _sse({'type': 'step_start', 'question_idx': q_idx,
+                        'step_id': 'grouping', 'step_label': '文章分组(向量相似度)',
+                        'system_prompt': f'(BGE-M3向量+余弦相似度>={sim_threshold})',
+                        'user_prompt': f'{len(article_parts)}篇文章'})
 
-            for art_idx, art_content in enumerate(article_parts):
-                # 从文章内容中提取NTPSID作为article_id
+            try:
+                groups = _group_articles(article_parts, max_chars, sim_threshold)
+            except Exception as e:
+                _log(f"[stability] row={row_num} 分组失败，回退为逐篇处理: {e}")
+                groups = [[art] for art in article_parts]
+
+            group_info = ' | '.join(f"组{i+1}:{len(g)}篇" for i, g in enumerate(groups))
+            _log(f"[stability] row={row_num} 分组完成: {len(groups)}组 — {group_info}")
+            for gi, g in enumerate(groups):
                 import re
-                ntpsid_match = re.search(r'NTPSID:\s*(\d+)', art_content)
-                art_id = f"ART_{ntpsid_match.group(1)}" if ntpsid_match else f"ART_{row_num}_P{art_idx + 1}"
-                tasks.append((f'skill1_art{art_idx+1}', f'条件-结论对抽取(文章{art_idx+1})',
-                              SKILL1_SYSTEM, f"文章ID: {art_id}\n文章内容:\n{art_content}", 'skill1'))
-                tasks.append((f'skill2_art{art_idx+1}', f'政策场景枚举(文章{art_idx+1})',
-                              SKILL2_SYSTEM, f"用户问题：{question}\n\n相关文章：\n{art_content}", 'skill2'))
-                tasks.append((f'skill3_art{art_idx+1}', f'概念关系断言(文章{art_idx+1})',
-                              SKILL3_SYSTEM, f"用户问题：{question}\n\n相关文章：\n{art_content}", 'skill3'))
-                tasks.append((f'skill4_art{art_idx+1}', f'时间约束抽取(文章{art_idx+1})',
-                              SKILL4_SYSTEM, f"用户问题：{question}\n\n相关文章：\n{art_content}", 'skill4'))
+                art_ids = []
+                for art in g:
+                    m = re.search(r'NTPSID:\s*(\d+)', art)
+                    art_ids.append(f"ART_{m.group(1)}" if m else f"(未知)")
+                total_chars = sum(len(a) for a in g)
+                _log(f"[stability]   组{gi+1}: 文章={art_ids}, 总字符数={total_chars}")
+            yield _sse({'type': 'step_complete', 'question_idx': q_idx,
+                        'step_id': 'grouping', 'step_label': '文章分组(向量相似度)',
+                        'response': f"分为{len(groups)}组: {group_info}"})
 
-            _log(f"[stability] row={row_num} Phase1: {len(tasks)}个逐篇任务（{len(article_parts)}篇×4个Skill）")
-
-            # Send start events
-            for sid, slabel, ssys, suser, _group in tasks:
-                yield _sse({'type': 'step_start', 'question_idx': q_idx,
-                            'step_id': sid, 'step_label': slabel,
-                            'system_prompt': ssys[:500], 'user_prompt': suser[:500]})
-
-            # Run all Phase 1 tasks in parallel
+            # 2b: 每组调用合并Skill（并行）
             task_queue = queue.Queue()
 
-            def _run_task(_sid, _slabel, _ssys, _suser, _group):
+            def _run_combined(group_idx, group_articles):
+                label = f"合并Skill(组{group_idx+1})"
+                sid = f'combined_group{group_idx+1}'
                 try:
-                    resp = _call_llm(_ssys, _suser, temperature=0.01, max_tokens=0, timeout=600)
+                    # 为每篇文章提取NTPSID作为ID
+                    import re
+                    arts_text_parts = []
+                    group_art_ids = []
+                    for ai, art in enumerate(group_articles):
+                        ntpsid_match = re.search(r'NTPSID:\s*(\d+)', art)
+                        art_id = f"ART_{ntpsid_match.group(1)}" if ntpsid_match else f"ART_{row_num}_G{group_idx+1}_P{ai+1}"
+                        group_art_ids.append(art_id)
+                        arts_text_parts.append(f"### 文章ID: {art_id}\n{art}")
+                    combined_text = '\n\n'.join(arts_text_parts)
+                    user_prompt = f"用户问题：{question}\n\n文章列表：\n{combined_text}"
+                    resp = _call_llm(COMBINED_SKILL_SYSTEM, user_prompt,
+                                     temperature=0, max_tokens=0, timeout=600)
                     parsed = _parse_json_response(resp)
-                    if _group == 'skill3' and parsed and isinstance(parsed, list):
-                        for item in parsed:
-                            if isinstance(item, dict):
-                                item.setdefault('entity_a', item.pop('concept_A', ''))
-                                item.setdefault('entity_b', item.pop('concept_B', ''))
-                                item.setdefault('relation_type', item.pop('relation', ''))
                     if parsed is None and resp:
-                        _log(f"[stability] row={row_num} {_slabel} JSON解析失败，原始响应前500字: {resp[:500]}")
-                    task_queue.put((_sid, _slabel, resp, parsed, None, _group))
+                        _log(f"[stability] row={row_num} {label} JSON解析失败，原始响应前500字: {resp[:500]}")
+                    task_queue.put((sid, label, resp, parsed, None, group_art_ids))
                 except Exception as e:
-                    task_queue.put((_sid, _slabel, None, None, str(e), _group))
+                    task_queue.put((sid, label, None, None, str(e), []))
 
-            per_article_results = {'skill1': [], 'skill2': [], 'skill3': [], 'skill4': []}
+            # Send start events + submit tasks
+            for gi, group in enumerate(groups):
+                sid = f'combined_group{gi+1}'
+                label = f"合并Skill(组{gi+1})"
+                yield _sse({'type': 'step_start', 'question_idx': q_idx,
+                            'step_id': sid, 'step_label': label,
+                            'system_prompt': COMBINED_SKILL_SYSTEM[:300],
+                            'user_prompt': f'组{gi+1}: {len(group)}篇文章'})
 
-            with ThreadPoolExecutor(max_workers=min(thread_count, len(tasks))) as executor:
-                for sid, slabel, ssys, suser, group in tasks:
-                    executor.submit(_run_task, sid, slabel, ssys, suser, group)
+            with ThreadPoolExecutor(max_workers=min(thread_count, len(groups))) as executor:
+                for gi, group in enumerate(groups):
+                    executor.submit(_run_combined, gi, group)
 
+                all_cc_pairs = []
+                all_scenes = []
+                all_relations = []
+                all_time_constraints = []
                 completed = 0
-                while completed < len(tasks):
-                    sid, slabel, resp, parsed, error, group = task_queue.get()
+
+                while completed < len(groups):
+                    sid, label, resp, parsed, error, group_art_ids = task_queue.get()
                     completed += 1
                     if error:
-                        _log(f"[stability] row={row_num} {slabel}失败: {error}")
+                        _log(f"[stability] row={row_num} {label}失败: {error}")
                         yield _sse({'type': 'step_error', 'question_idx': q_idx,
-                                    'step_id': sid, 'step_label': slabel, 'error': error})
+                                    'step_id': sid, 'step_label': label, 'error': error})
                     else:
-                        _log(f"[stability] row={row_num} {slabel}完成，原始响应:\n{resp}")
-                        _log(f"[stability] row={row_num} {slabel}解析结果:\n{json.dumps(parsed, ensure_ascii=False, indent=2) if parsed else 'None'}")
+                        _log(f"[stability] row={row_num} {label}完成，原始响应:\n{resp}")
+                        if parsed and isinstance(parsed, dict):
+                            cc = parsed.get('condition_conclusion_pairs', [])
+                            scenes = parsed.get('policy_scenes', [])
+                            rels = parsed.get('concept_relations', [])
+                            tcs = parsed.get('time_constraints', [])
+                            # 概念关系字段名映射
+                            for item in rels:
+                                if isinstance(item, dict):
+                                    item.setdefault('entity_a', item.pop('concept_A', ''))
+                                    item.setdefault('entity_b', item.pop('concept_B', ''))
+                                    item.setdefault('relation_type', item.pop('relation', ''))
+                            # 规范化article_ids
+                            for item in cc + tcs + rels:
+                                if isinstance(item, dict):
+                                    aid = item.pop('article_id', None)
+                                    if aid and 'article_ids' not in item:
+                                        item['article_ids'] = [aid] if isinstance(aid, str) else aid
+                                    # 如果仍无article_ids，用本组的文章ID回填
+                                    if not item.get('article_ids'):
+                                        item['article_ids'] = list(group_art_ids)
+                            all_cc_pairs.extend(cc if isinstance(cc, list) else [])
+                            all_scenes.extend(scenes if isinstance(scenes, list) else [])
+                            all_relations.extend(rels if isinstance(rels, list) else [])
+                            all_time_constraints.extend(tcs if isinstance(tcs, list) else [])
+                            _log(f"[stability] row={row_num} {label} → 条件-结论={len(cc)}, "
+                                 f"场景={len(scenes)}, 断言={len(rels)}, 时间={len(tcs)}")
                         yield _sse({'type': 'step_complete', 'question_idx': q_idx,
-                                    'step_id': sid, 'step_label': slabel,
+                                    'step_id': sid, 'step_label': label,
                                     'response': resp, 'parsed': parsed})
-                        if group in per_article_results:
-                            per_article_results[group].append(parsed if isinstance(parsed, list) else [])
 
-            # ---- Step 2b: Skill 3 Phase 2 - 跨文章关系发现 ----
-            phase1_assertions = _merge_lists(per_article_results['skill3'])
+            # 2c: 跨组合并去重
+            _log(f"[stability] row={row_num} 开始跨组合并（条件-结论={len(all_cc_pairs)}, "
+                 f"场景={len(all_scenes)}, 断言={len(all_relations)}, "
+                 f"时间约束={len(all_time_constraints)}）")
 
-            if len(article_parts) > 1 and phase1_assertions:
-                _log(f"[stability] row={row_num} Phase2: 跨文章关系发现（已有{len(phase1_assertions)}条断言）")
-                yield _sse({'type': 'step_start', 'question_idx': q_idx,
-                            'step_id': 'skill3_cross', 'step_label': '跨文章概念关系发现',
-                            'system_prompt': SKILL3_CROSS_SYSTEM[:500],
-                            'user_prompt': f'已有断言: {json.dumps(phase1_assertions, ensure_ascii=False)[:500]}'})
+            products['condition_pairs'] = _merge_condition_pairs(all_cc_pairs)
+            products['scene_enum'] = _dedupe_strings(all_scenes)
+            products['assertions_raw'] = all_relations
+            products['time_constraints'] = _merge_time_constraints(all_time_constraints)
 
-                try:
-                    cross_prompt = (
-                        f"用户问题：{question}\n\n"
-                        f"已有断言列表：\n{json.dumps(phase1_assertions, ensure_ascii=False, indent=2)}"
-                    )
-                    cross_resp = _call_llm(SKILL3_CROSS_SYSTEM, cross_prompt,
-                                          temperature=0.01, max_tokens=0, timeout=600)
-                    cross_parsed = _parse_json_response(cross_resp)
-                    if cross_parsed and isinstance(cross_parsed, list):
-                        for item in cross_parsed:
-                            if isinstance(item, dict):
-                                item.setdefault('entity_a', item.pop('concept_A', ''))
-                                item.setdefault('entity_b', item.pop('concept_B', ''))
-                                item.setdefault('relation_type', item.pop('relation', ''))
-                        _log(f"[stability] row={row_num} 跨文章关系发现完成，新增{len(cross_parsed)}条")
-                    else:
-                        cross_parsed = []
-                        _log(f"[stability] row={row_num} 跨文章关系发现: 无新增断言")
-
-                    yield _sse({'type': 'step_complete', 'question_idx': q_idx,
-                                'step_id': 'skill3_cross', 'step_label': '跨文章概念关系发现',
-                                'response': cross_resp, 'parsed': cross_parsed})
-                    phase1_assertions.extend(cross_parsed)
-                except Exception as e:
-                    _log(f"[stability] row={row_num} 跨文章关系发现失败: {e}")
-                    yield _sse({'type': 'step_error', 'question_idx': q_idx,
-                                'step_id': 'skill3_cross', 'step_label': '跨文章概念关系发现',
-                                'error': str(e)})
-
-            # Merge all results
-            products['condition_pairs'] = _merge_lists(per_article_results['skill1'])
-            products['scene_enum'] = _dedupe_strings(_merge_lists(per_article_results['skill2']))
-            products['assertions_raw'] = phase1_assertions
-            products['time_constraints'] = _merge_lists(per_article_results['skill4'])
-
-            _log(f"[stability] row={row_num} 逐篇合并结果: 条件-结论={len(products['condition_pairs'])}条, "
+            _log(f"[stability] row={row_num} 合并结果: 条件-结论={len(products['condition_pairs'])}条, "
                  f"场景={len(products['scene_enum'])}个, 断言={len(products['assertions_raw'])}条, "
                  f"时间约束={len(products['time_constraints'])}条")
 
             # ---- Step 3: Validate assertions ----
+            raw_cc_count = len(products['condition_pairs'])
+            raw_scene_count = len(products['scene_enum'])
+            raw_tc_count = len(products['time_constraints'])
+
             raw_count = len(products['assertions_raw'])
             cleaned = _validate_assertions(products['assertions_raw'])
             products['assertions_cleaned'] = cleaned
@@ -783,6 +883,9 @@ def stability_process():
             products['constraint_texts'] = constraint_texts
 
             _log(f"[stability] row={row_num} 断言校验: {raw_count}→{len(cleaned)}")
+            _log(f"[stability] row={row_num} 条件-结论对(合并后): {raw_cc_count}条")
+            _log(f"[stability] row={row_num} 政策场景(去重后): {raw_scene_count}个")
+            _log(f"[stability] row={row_num} 时间约束(合并后): {raw_tc_count}条")
             yield _sse({'type': 'validation', 'question_idx': q_idx,
                         'original_count': raw_count, 'cleaned_count': len(cleaned),
                         'removed_count': raw_count - len(cleaned),
@@ -833,10 +936,14 @@ def stability_process():
                 'question': question,
                 'prompt': kb_prompt,
                 'articles_text': products['articles_text'],
+                'raw_condition_pairs': all_cc_pairs,
                 'condition_pairs': products['condition_pairs'],
+                'raw_scene_enum': all_scenes,
                 'scene_enum': products['scene_enum'],
+                'raw_assertions': all_relations,
                 'assertions_cleaned': products['assertions_cleaned'],
                 'constraint_texts': products['constraint_texts'],
+                'raw_time_constraints': all_time_constraints,
                 'time_constraints': products['time_constraints'],
                 'final_prompt': products['final_prompt'],
                 'final_answer': products['final_answer']
@@ -864,7 +971,7 @@ def stability_process():
 
 
 def _save_results(results, output_path):
-    """Save results to Excel"""
+    """Save results to Excel with pre/post processing comparison"""
     wb = Workbook()
     ws = wb.active
     ws.title = '回答稳定性结果'
@@ -875,10 +982,20 @@ def _save_results(results, output_path):
     )
 
     headers = [
-        ('问题', 50), ('提示词(B列)', 40), ('文章内容', 80),
-        ('条件-结论对', 60), ('政策场景', 30),
-        ('概念断言(清洗后)', 50), ('概念约束文本', 40),
-        ('时间约束', 40), ('最终提示词', 80), ('最终回答', 80)
+        ('问题', 50),
+        ('提示词(B列)', 40),
+        ('文章内容', 80),
+        ('条件-结论对(处理前)', 60),
+        ('条件-结论对(处理后)', 60),
+        ('政策场景(处理前)', 30),
+        ('政策场景(处理后)', 30),
+        ('概念断言(处理前)', 50),
+        ('概念断言(清洗后)', 50),
+        ('概念约束文本', 40),
+        ('时间约束(处理前)', 40),
+        ('时间约束(处理后)', 40),
+        ('最终提示词', 80),
+        ('最终回答', 80)
     ]
 
     for col, (header, width) in enumerate(headers, 1):
@@ -890,13 +1007,20 @@ def _save_results(results, output_path):
 
     for row_idx, r in enumerate(results, 2):
         values = [
-            r['question'], r.get('prompt', ''), r.get('articles_text', ''),
+            r['question'],
+            r.get('prompt', ''),
+            r.get('articles_text', ''),
+            json.dumps(r.get('raw_condition_pairs', []), ensure_ascii=False, indent=2),
             json.dumps(r.get('condition_pairs', []), ensure_ascii=False, indent=2),
+            json.dumps(r.get('raw_scene_enum', []), ensure_ascii=False),
             json.dumps(r.get('scene_enum', []), ensure_ascii=False),
+            json.dumps(r.get('raw_assertions', []), ensure_ascii=False, indent=2),
             json.dumps(r.get('assertions_cleaned', []), ensure_ascii=False, indent=2),
             '\n'.join(r.get('constraint_texts', [])),
+            json.dumps(r.get('raw_time_constraints', []), ensure_ascii=False, indent=2),
             json.dumps(r.get('time_constraints', []), ensure_ascii=False, indent=2),
-            r.get('final_prompt', ''), r.get('final_answer', '')
+            r.get('final_prompt', ''),
+            r.get('final_answer', '')
         ]
         for col, val in enumerate(values, 1):
             cell = ws.cell(row=row_idx, column=col, value=val)

@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Flask (5001)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "app.app",
+            "env": {
+                "FLASK_PORT": "5001"
+            },
+            "jinja": true,
+            "autoStartBrowser": false
+        }
+    ]
+}

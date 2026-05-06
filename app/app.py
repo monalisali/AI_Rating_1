@@ -1448,4 +1448,5 @@ if __name__ == '__main__':
     app.register_blueprint(model_scoring_bp)
     from app.answer_stability import stability_bp
     app.register_blueprint(stability_bp)
-    app.run(debug=True, port=5001, host='0.0.0.0')
+    port = int(os.environ.get('FLASK_PORT', 5002))
+    app.run(debug=True, port=port, host='0.0.0.0')

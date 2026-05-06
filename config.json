@@ -12,5 +12,8 @@
     "scoring_model": "glm-coding-5-5",
     "max_prompt_length": 30000,
     "max_prompt_ratio": 1.3,
-    "min_accuracy_score": 40
+    "min_accuracy_score": 40,
+    "group_max_chars": 12000,
+    "group_sim_threshold": 0.6,
+    "merge_cc_sim_threshold": 0.85
 }
