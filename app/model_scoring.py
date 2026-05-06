@@ -323,4 +323,53 @@ def _save_to_excel(all_round_results, output_path, model_name):
 
             row_idx += 1
 
+    # 新增统计Sheet
+    _add_stats_sheet(wb, all_round_results, thin_border)
+
     wb.save(output_path)
+
+
+def _add_stats_sheet(wb, all_round_results, thin_border):
+    """在第二个Sheet中输出评分统计"""
+    ws = wb.create_sheet(title='统计')
+
+    # 收集所有有效评分
+    all_scores = []
+    for round_data in all_round_results:
+        for r in round_data['results']:
+            scores = r.get('scores')
+            if scores and scores.get('success'):
+                all_scores.append(scores.get('total_score', 0))
+
+    total = len(all_scores)
+    total_sum = sum(all_scores) if all_scores else 0
+    avg = round(total_sum / total, 1) if total > 0 else 0
+    range_0_60 = len([s for s in all_scores if 0 < s <= 60])
+    range_61_79 = len([s for s in all_scores if 61 <= s <= 79])
+    range_80_100 = len([s for s in all_scores if 80 <= s <= 100])
+    count_0 = len([s for s in all_scores if s == 0])
+    count_100 = len([s for s in all_scores if s == 100])
+
+    stats = [
+        ('指标', '数值'),
+        ('总数量', total),
+        ('总分', total_sum),
+        ('平均分', avg),
+        ('0-60分数量', range_0_60),
+        ('61-79分数量', range_61_79),
+        ('80-100分数量', range_80_100),
+        ('0分数量', count_0),
+        ('100分数量', count_100),
+    ]
+
+    for row_idx, (label, value) in enumerate(stats, 1):
+        cell_label = ws.cell(row=row_idx, column=1, value=label)
+        cell_label.font = Font(bold=(row_idx == 1))
+        cell_label.border = thin_border
+
+        cell_value = ws.cell(row=row_idx, column=2, value=value)
+        cell_value.font = Font(bold=(row_idx == 1))
+        cell_value.border = thin_border
+
+    ws.column_dimensions['A'].width = 20
+    ws.column_dimensions['B'].width = 15
