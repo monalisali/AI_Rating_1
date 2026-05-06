@@ -1015,6 +1015,7 @@ def process_questions():
     data = request.json
     filename = data.get('filename')
     enable_scoring = data.get('enable_scoring', False)
+    enable_optimize = data.get('enable_optimize', True)
     scoring_prompt_template = data.get('scoring_prompt', None)
     thread_count = data.get('thread_count', 2)
     thread_count = max(1, min(8, int(thread_count)))
@@ -1039,7 +1040,7 @@ def process_questions():
     total = len(questions)
     system_prompt = load_system_prompt()
     optimize_template = None  # 使用内层默认的优化指令
-    logger.info(f"========== 开始处理 {total}题 | {thread_count}线程 | 评分{'开' if enable_scoring else '关'} | 内层{max_attempts}次 | 外层{max_optimize_rounds}轮 | 阈值{score_threshold} ==========")
+    logger.info(f"========== 开始处理 {total}题 | {thread_count}线程 | 评分{'开' if enable_scoring else '关'} | 优化{'开' if enable_scoring and enable_optimize else '关'} | 内层{max_attempts}次 | 外层{max_optimize_rounds}轮 | 阈值{score_threshold} ==========")
 
     def generate():
         nonlocal system_prompt, optimize_template
@@ -1152,6 +1153,7 @@ def process_questions():
 
                     need_retry = (
                         enable_scoring
+                        and enable_optimize
                         and inner_attempt < max_attempts
                         and (current_prompt_avg < score_threshold or has_low_accuracy)
                         and current_prompt_avg >= 0
@@ -1192,8 +1194,8 @@ def process_questions():
                 'all_attempt_logs': all_attempt_logs
             })
 
-            # 已达标则不进入外层循环
-            if round_best_avg >= score_threshold:
+            # 已达标或不启用优化则不进入外层循环
+            if round_best_avg >= score_threshold or not enable_optimize:
                 break
 
             # 外层还有轮次，优化优化方法（带异常保护）
