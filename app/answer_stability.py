@@ -29,6 +29,28 @@ stability_bp = Blueprint('answer_stability', __name__)
 UPLOAD_FOLDER = os.path.join(ROOT_DIR, 'uploads')
 OUTPUT_FOLDER = os.path.join(ROOT_DIR, 'outputs')
 
+# ===================== 后处理配置（三层过滤 按计算后的阈值过滤） =====================
+# 是否启用三层过滤（相关性→置信度→冲突消解），False时跳过过滤，"过滤后"栏位填"阈值过滤逻辑未启用"
+FILTER_ENABLED = False
+
+# 相关性过滤阈值（BGE-M3余弦相似度，产物文本与用户问题的最低相似度）
+FILTER_REL_CC = 0.60          # 条件-结论对
+FILTER_REL_SCENE = 0.50       # 政策场景标签
+FILTER_REL_ASSERTION = 0.40   # 概念关系断言
+FILTER_REL_TIME = 0.50        # 时间约束
+
+# 置信度过滤阈值（基于source_count和证据质量计算的最低置信度）
+FILTER_CONF_CC = 0.60         # 条件-结论对
+FILTER_CONF_ASSERTION = 0.60  # 概念关系断言
+FILTER_CONF_TIME = 0.80       # 时间约束（时间信息通常可靠，提高阈值）
+# 政策场景不设置信度过滤，仅依赖相关性
+
+# 专门性关键词（冲突消解中判断断言是否针对特定主体）
+SPECIFIC_KEYWORDS = [
+    "西部大开发", "高新技术企业", "小型微利", "软件企业",
+    "集成电路", "经济特区", "浦东新区", "海南自贸港"
+]
+
 
 def _get_articles_full(question: str, max_rounds: int = 12) -> list:
     """多轮对话获取文章，返回每轮内容的列表（不丢弃中间轮次的文章原文）"""
@@ -259,6 +281,19 @@ def _group_articles(article_parts, max_chars=None, sim_threshold=None):
 
 # ===================== Merge Functions =====================
 
+def _batch_embeddings(texts):
+    """批量生成向量并缓存，避免重复调用BGE-M3"""
+    cache = {}
+    unique_texts = list(set(t for t in texts if t))
+    if not unique_texts:
+        return cache
+    model = _get_bge_model()
+    vecs = model.encode(unique_texts, normalize_embeddings=True, show_progress_bar=False)
+    for text, vec in zip(unique_texts, vecs):
+        cache[text] = vec.tolist()
+    return cache
+
+
 def _merge_condition_pairs(all_pairs, sim_threshold=None):
     """合并条件-结论对：语义相似度>=阈值则合并article_ids"""
     import numpy as np
@@ -267,6 +302,11 @@ def _merge_condition_pairs(all_pairs, sim_threshold=None):
         return []
 
     sim_threshold = sim_threshold or get_config('merge_cc_sim_threshold', 0.95)
+
+    # 预计算所有文本的向量（只调一次BGE-M3）
+    all_texts = [p.get('condition', '') + p.get('conclusion', '') for p in all_pairs]
+    vec_cache = _batch_embeddings(all_texts)
+
     merged = []
     used_indices = set()
 
@@ -278,19 +318,24 @@ def _merge_condition_pairs(all_pairs, sim_threshold=None):
         if isinstance(ids, str):
             ids = [ids]
 
+        text_i = all_texts[i]
+        vec_i = vec_cache.get(text_i)
+        if not vec_i:
+            current['article_ids'] = ids
+            if 'article_id' in current:
+                del current['article_id']
+            merged.append(current)
+            continue
+
         for j in range(i + 1, len(all_pairs)):
             if j in used_indices:
                 continue
-            other = all_pairs[j]
-            # 计算条件+结论的语义相似度
-            text_i = current.get('condition', '') + current.get('conclusion', '')
-            text_j = other.get('condition', '') + other.get('conclusion', '')
-            if text_i and text_j:
-                vec_i = _generate_embedding(text_i)
-                vec_j = _generate_embedding(text_j)
+            text_j = all_texts[j]
+            vec_j = vec_cache.get(text_j)
+            if vec_j:
                 sim = float(np.dot(vec_i, vec_j))
                 if sim >= sim_threshold:
-                    other_ids = other.get('article_ids', other.get('article_id', []))
+                    other_ids = all_pairs[j].get('article_ids', all_pairs[j].get('article_id', []))
                     if isinstance(other_ids, str):
                         other_ids = [other_ids]
                     ids.extend([x for x in other_ids if x not in ids])
@@ -333,6 +378,195 @@ def _merge_time_constraints(all_constraints):
 
 def _parse_json_response(text):
     """Extract JSON from LLM response"""
+    if not text:
+        return None
+    text = text.strip()
+    if text.startswith('```'):
+        text = text.split('\n', 1)[1] if '\n' in text else text[3:]
+    if text.endswith('```'):
+        text = text[:-3]
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    for start_char, end_char in [('[', ']'), ('{', '}')]:
+        start = text.find(start_char)
+        end = text.rfind(end_char) + 1
+        if start != -1 and end > start:
+            try:
+                return json.loads(text[start:end])
+            except Exception:
+                pass
+    return None
+
+
+# ===================== Post-Processing Filters =====================
+
+def _compute_confidence(item):
+    """计算置信度：基于source_count(多源验证)和evidence(证据质量)"""
+    source_count = len(item.get('article_ids', []))
+    conf = 0.9 if source_count >= 2 else 0.6
+    evidence = item.get('evidence', '')
+    if len(evidence) > 100 and ('第' in evidence or '条' in evidence):
+        conf = min(1.0, conf + 0.1)
+    return conf
+
+
+def _filter_by_relevance(items, query_vec, text_fn, threshold):
+    """相关性过滤：用BGE-M3计算余弦相似度，保留>=threshold的"""
+    import numpy as np
+    if not items:
+        return []
+    # 批量预计算所有文本向量
+    texts = [text_fn(item) for item in items]
+    vec_cache = _batch_embeddings(texts)
+    kept = []
+    for idx, item in enumerate(items):
+        text = texts[idx]
+        if not text:
+            continue
+        vec = vec_cache.get(text)
+        if not vec:
+            continue
+        sim = float(np.dot(query_vec, vec))
+        item['relevance_score'] = round(sim, 4)
+        # 记录被过滤掉的item
+        if sim < threshold:
+            _log(f"[stability] 相关性过滤-丢弃: 相似度={item['relevance_score']} < {threshold}, 文本={text[:80]}")
+        if sim >= threshold:
+            kept.append(item)
+    return kept
+
+
+def _filter_by_confidence(items, min_conf):
+    """置信度过滤：保留置信度>=min_conf的"""
+    if not items:
+        return []
+    kept = []
+    for item in items:
+        conf = _compute_confidence(item)
+        item['confidence'] = conf
+        if conf >= min_conf:
+            kept.append(item)
+    return kept
+
+
+def _is_specific(item):
+    """判断断言是否具有专门性（针对特定主体）"""
+    text = json.dumps(item, ensure_ascii=False)
+    return any(kw in text for kw in SPECIFIC_KEYWORDS)
+
+
+def _resolve_conflict_assertions(assertions):
+    """概念关系冲突消解：按(entity_a, entity_b)分组，保留优先级最高的"""
+    groups = {}
+    for a in assertions:
+        ea, eb = a.get('entity_a', ''), a.get('entity_b', '')
+        key = tuple(sorted([ea, eb]))
+        groups.setdefault(key, []).append(a)
+
+    resolved = []
+    for key, group in groups.items():
+        if len(group) == 1:
+            resolved.append(group[0])
+        else:
+            # 排序：发布时间晚 > 专门性高 > source_count大
+            group.sort(key=lambda x: (
+                x.get('publish_date', '1900-01-01'),
+                _is_specific(x),
+                len(x.get('article_ids', []))
+            ), reverse=True)
+            resolved.append(group[0])
+            for discarded in group[1:]:
+                _log(f"[stability] 冲突消解-丢弃断言: {discarded.get('entity_a', '')} "
+                     f"↔ {discarded.get('entity_b', '')} ({discarded.get('relation_type', '')})")
+    return resolved
+
+
+def _resolve_conflict_cc_pairs(pairs):
+    """条件-结论对冲突消解：同condition不同conclusion时保留优先级高的"""
+    groups = {}
+    for p in pairs:
+        key = p.get('condition', '')
+        groups.setdefault(key, []).append(p)
+
+    resolved = []
+    for key, group in groups.items():
+        if len(group) == 1:
+            resolved.append(group[0])
+        else:
+            group.sort(key=lambda x: (
+                x.get('publish_date', '1900-01-01'),
+                _is_specific(x),
+                len(x.get('article_ids', []))
+            ), reverse=True)
+            resolved.append(group[0])
+            for discarded in group[1:]:
+                _log(f"[stability] 冲突消解-丢弃结论: condition={key[:50]}, "
+                     f"conclusion={discarded.get('conclusion', '')[:50]}")
+    return resolved
+
+
+def _filter_skills_outputs(user_query, products):
+    """三层过滤主函数：相关性 → 置信度 → 冲突消解"""
+    import numpy as np
+
+    _log(f"[stability] 开始三层过滤，用户问题: {user_query[:100]}")
+    query_vec = _generate_embedding(user_query)
+
+    # 1. 条件-结论对：相关性 → 置信度 → 冲突消解
+    cc = list(products.get('condition_pairs', []))
+    _log(f"[stability] 条件-结论对: 过滤前={len(cc)}")
+    cc = _filter_by_relevance(cc, query_vec,
+                              lambda p: p.get('condition', '') + ' → ' + p.get('conclusion', ''),
+                              FILTER_REL_CC)
+    _log(f"[stability] 条件-结论对: 相关性过滤后={len(cc)} (阈值={FILTER_REL_CC})")
+    cc = _filter_by_confidence(cc, FILTER_CONF_CC)
+    _log(f"[stability] 条件-结论对: 置信度过滤后={len(cc)} (阈值={FILTER_CONF_CC})")
+    cc = _resolve_conflict_cc_pairs(cc)
+    _log(f"[stability] 条件-结论对: 冲突消解后={len(cc)}")
+
+    # 2. 政策场景：仅相关性过滤
+    scenes = list(products.get('scene_enum', []))
+    scene_dicts = [{'label': s} for s in scenes]
+    _log(f"[stability] 政策场景: 过滤前={len(scene_dicts)}")
+    scene_dicts = _filter_by_relevance(scene_dicts, query_vec,
+                                       lambda s: s.get('label', ''), FILTER_REL_SCENE)
+    filtered_scenes = [s['label'] for s in scene_dicts]
+    _log(f"[stability] 政策场景: 相关性过滤后={len(filtered_scenes)} (阈值={FILTER_REL_SCENE})")
+
+    # 3. 概念关系：相关性 → 置信度 → 冲突消解
+    rels = list(products.get('assertions_raw', []))
+    _log(f"[stability] 概念断言: 过滤前={len(rels)}")
+    rels = _filter_by_relevance(rels, query_vec,
+                                lambda r: f"{r.get('entity_a', '')} {r.get('entity_b', '')} {r.get('relation_type', '')}",
+                                FILTER_REL_ASSERTION)
+    _log(f"[stability] 概念断言: 相关性过滤后={len(rels)} (阈值={FILTER_REL_ASSERTION})")
+    rels = _filter_by_confidence(rels, FILTER_CONF_ASSERTION)
+    _log(f"[stability] 概念断言: 置信度过滤后={len(rels)} (阈值={FILTER_CONF_ASSERTION})")
+    rels = _resolve_conflict_assertions(rels)
+    _log(f"[stability] 概念断言: 冲突消解后={len(rels)}")
+
+    # 4. 时间约束：相关性 → 置信度
+    tcs = list(products.get('time_constraints', []))
+    _log(f"[stability] 时间约束: 过滤前={len(tcs)}")
+    tcs = _filter_by_relevance(tcs, query_vec,
+                               lambda t: f"{t.get('policy_name', '')} {t.get('constraint_type', '')} {t.get('condition', '')}",
+                               FILTER_REL_TIME)
+    _log(f"[stability] 时间约束: 相关性过滤后={len(tcs)} (阈值={FILTER_REL_TIME})")
+    tcs = _filter_by_confidence(tcs, FILTER_CONF_TIME)
+    _log(f"[stability] 时间约束: 置信度过滤后={len(tcs)} (阈值={FILTER_CONF_TIME})")
+
+    return {
+        'condition_pairs': cc,
+        'policy_scenes': filtered_scenes,
+        'concept_relations': rels,
+        'time_constraints': tcs
+    }
+
+
+
     if not text:
         return None
     text = text.strip()
@@ -871,13 +1105,62 @@ def stability_process():
                  f"场景={len(products['scene_enum'])}个, 断言={len(products['assertions_raw'])}条, "
                  f"时间约束={len(products['time_constraints'])}条")
 
-            # ---- Step 3: Validate assertions ----
-            raw_cc_count = len(products['condition_pairs'])
-            raw_scene_count = len(products['scene_enum'])
-            raw_tc_count = len(products['time_constraints'])
+            # ---- Step 2d: 三层过滤（相关性→置信度→冲突消解）----
+            yield _sse({'type': 'step_start', 'question_idx': q_idx,
+                        'step_id': 'filtering', 'step_label': '三层过滤(相关性+置信度+冲突消解)',
+                        'system_prompt': '(纯代码规则过滤，不调用LLM)' if FILTER_ENABLED else '(已禁用)',
+                        'user_prompt': question[:200]})
+            if FILTER_ENABLED:
+                try:
+                    filtered = _filter_skills_outputs(question, products)
+                    products['filtered_condition_pairs'] = filtered['condition_pairs']
+                    products['filtered_scene_enum'] = filtered['policy_scenes']
+                    products['filtered_assertions'] = filtered['concept_relations']
+                    products['filtered_time_constraints'] = filtered['time_constraints']
+                    _log(f"[stability] row={row_num} 三层过滤完成: "
+                         f"条件-结论={len(filtered['condition_pairs'])}条, "
+                         f"场景={len(filtered['policy_scenes'])}个, "
+                         f"断言={len(filtered['concept_relations'])}条, "
+                         f"时间={len(filtered['time_constraints'])}条")
+                except Exception as e:
+                    _log(f"[stability] row={row_num} 三层过滤失败，使用合并后数据: {e}")
+                    products['filtered_condition_pairs'] = products['condition_pairs']
+                    products['filtered_scene_enum'] = products['scene_enum']
+                    products['filtered_assertions'] = products['assertions_raw']
+                    products['filtered_time_constraints'] = products['time_constraints']
+            else:
+                # 过滤未启用，标记占位符
+                _log(f"[stability] row={row_num} 三层过滤已禁用(FILTER_ENABLED=False)")
+                products['filtered_condition_pairs'] = '阈值过滤逻辑未启用'
+                products['filtered_scene_enum'] = '阈值过滤逻辑未启用'
+                products['filtered_assertions'] = '阈值过滤逻辑未启用'
+                products['filtered_time_constraints'] = '阈值过滤逻辑未启用'
+            yield _sse({'type': 'step_complete', 'question_idx': q_idx,
+                        'step_id': 'filtering', 'step_label': '三层过滤(相关性+置信度+冲突消解)',
+                        'response': f"过滤后: CC={len(products['filtered_condition_pairs']) if isinstance(products['filtered_condition_pairs'], list) else '未启用'}, "
+                                    f"场景={len(products['filtered_scene_enum']) if isinstance(products['filtered_scene_enum'], list) else '未启用'}, "
+                                    f"断言={len(products['filtered_assertions']) if isinstance(products['filtered_assertions'], list) else '未启用'}, "
+                                    f"时间={len(products['filtered_time_constraints']) if isinstance(products['filtered_time_constraints'], list) else '未启用'}"})
 
-            raw_count = len(products['assertions_raw'])
-            cleaned = _validate_assertions(products['assertions_raw'])
+            # ---- Step 3: Validate assertions ----
+            # 当过滤启用时用过滤后数据，禁用时用合并后数据
+            if FILTER_ENABLED:
+                cc_for_prompt = products['filtered_condition_pairs']
+                scene_for_prompt = products['filtered_scene_enum']
+                assertion_for_validate = products['filtered_assertions']
+                tc_for_prompt = products['filtered_time_constraints']
+            else:
+                cc_for_prompt = products['condition_pairs']
+                scene_for_prompt = products['scene_enum']
+                assertion_for_validate = products['assertions_raw']
+                tc_for_prompt = products['time_constraints']
+
+            raw_cc_count = len(cc_for_prompt)
+            raw_scene_count = len(scene_for_prompt)
+            raw_tc_count = len(tc_for_prompt)
+
+            raw_count = len(assertion_for_validate)
+            cleaned = _validate_assertions(assertion_for_validate)
             products['assertions_cleaned'] = cleaned
             constraint_texts = _convert_constraints_to_text(cleaned)
             products['constraint_texts'] = constraint_texts
@@ -894,10 +1177,10 @@ def stability_process():
             # ---- Step 4: Assemble final prompt ----
             final_prompt = _assemble_final_prompt(
                 question,
-                products['condition_pairs'],
-                products['scene_enum'],
+                cc_for_prompt,
+                scene_for_prompt,
                 constraint_texts,
-                products['time_constraints']
+                tc_for_prompt
             )
             products['final_prompt'] = final_prompt
             _log(f"[stability] row={row_num} 最终提示词组装完成（长度={len(final_prompt)}）")
@@ -938,13 +1221,17 @@ def stability_process():
                 'articles_text': products['articles_text'],
                 'raw_condition_pairs': all_cc_pairs,
                 'condition_pairs': products['condition_pairs'],
+                'filtered_condition_pairs': products.get('filtered_condition_pairs', []),
                 'raw_scene_enum': all_scenes,
                 'scene_enum': products['scene_enum'],
+                'filtered_scene_enum': products.get('filtered_scene_enum', []),
                 'raw_assertions': all_relations,
                 'assertions_cleaned': products['assertions_cleaned'],
+                'filtered_assertions': products.get('filtered_assertions', []),
                 'constraint_texts': products['constraint_texts'],
                 'raw_time_constraints': all_time_constraints,
                 'time_constraints': products['time_constraints'],
+                'filtered_time_constraints': products.get('filtered_time_constraints', []),
                 'final_prompt': products['final_prompt'],
                 'final_answer': products['final_answer']
             })
@@ -987,13 +1274,17 @@ def _save_results(results, output_path):
         ('文章内容', 80),
         ('条件-结论对(处理前)', 60),
         ('条件-结论对(处理后)', 60),
+        ('条件-结论对(过滤后)', 60),
         ('政策场景(处理前)', 30),
         ('政策场景(处理后)', 30),
+        ('政策场景(过滤后)', 30),
         ('概念断言(处理前)', 50),
         ('概念断言(清洗后)', 50),
+        ('概念断言(过滤后)', 50),
         ('概念约束文本', 40),
         ('时间约束(处理前)', 40),
         ('时间约束(处理后)', 40),
+        ('时间约束(过滤后)', 40),
         ('最终提示词', 80),
         ('最终回答', 80)
     ]
@@ -1006,19 +1297,29 @@ def _save_results(results, output_path):
         ws.column_dimensions[cell.column_letter].width = width
 
     for row_idx, r in enumerate(results, 2):
+        def _fmt_filtered(val):
+            """格式化过滤后数据：字符串直接返回（未启用提示），列表用json.dumps"""
+            if isinstance(val, str):
+                return val
+            return json.dumps(val, ensure_ascii=False, indent=2)
+
         values = [
             r['question'],
             r.get('prompt', ''),
             r.get('articles_text', ''),
             json.dumps(r.get('raw_condition_pairs', []), ensure_ascii=False, indent=2),
             json.dumps(r.get('condition_pairs', []), ensure_ascii=False, indent=2),
+            _fmt_filtered(r.get('filtered_condition_pairs', [])),
             json.dumps(r.get('raw_scene_enum', []), ensure_ascii=False),
             json.dumps(r.get('scene_enum', []), ensure_ascii=False),
+            _fmt_filtered(r.get('filtered_scene_enum', [])),
             json.dumps(r.get('raw_assertions', []), ensure_ascii=False, indent=2),
             json.dumps(r.get('assertions_cleaned', []), ensure_ascii=False, indent=2),
+            _fmt_filtered(r.get('filtered_assertions', [])),
             '\n'.join(r.get('constraint_texts', [])),
             json.dumps(r.get('raw_time_constraints', []), ensure_ascii=False, indent=2),
             json.dumps(r.get('time_constraints', []), ensure_ascii=False, indent=2),
+            _fmt_filtered(r.get('filtered_time_constraints', [])),
             r.get('final_prompt', ''),
             r.get('final_answer', '')
         ]
