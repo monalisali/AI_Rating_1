@@ -67,6 +67,9 @@ TOP_K_SCENE = 8     # 政策场景
 TOP_K_ASSERTION = 5 # 概念关系断言
 TOP_K_TIME = 5      # 时间约束
 
+# 法规文号前缀（用于结构重要性评分中匹配法规文号，如 国发[2007]39号、财税[2009]69号）
+DOC_NUMBER_PREFIXES = ["财税", "国税", "税务总局", "公告", "国发"]
+
 # 中文停用词表（用于jieba分词后过滤虚词和常见词）
 STOPWORDS = set([
     "的", "了", "是", "在", "和", "与", "或", "以及", "按照", "根据",
@@ -843,7 +846,9 @@ def _structural_score(text):
         score += 0.3
     if re.search(r'\d{4}年', text):
         score += 0.2
-    if re.search(r'(财税|国税|税务总局|公告)[\[\(]\d{4}[\d\]\)]', text):
+    if re.search(r'(' + '|'.join(DOC_NUMBER_PREFIXES) + r')[\[\(]\d{4}[\d\]\)]', text):
+        score += 0.2
+    if re.search(r'[\[\(]\d{4}[\]\)]\s*\d+号', text):
         score += 0.2
     if re.search(r'\d{1,3}(?:万|亿)?元', text):
         score += 0.1
