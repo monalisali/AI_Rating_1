@@ -51,6 +51,32 @@ SPECIFIC_KEYWORDS = [
     "集成电路", "经济特区", "浦东新区", "海南自贸港"
 ]
 
+# ===================== 多维评分过滤配置 =====================
+# 是否启用多维评分过滤（语义+实体重叠+逻辑独特度+结构重要性），False时"按权重过滤"栏位填"权重过滤逻辑未启用"
+SCORE_FILTER_ENABLED = True
+
+# 四维评分权重（总和应为1.0）
+SCORE_WEIGHT_SIM = 0.35         # 语义相关性权重（BGE-M3余弦相似度）
+SCORE_WEIGHT_OVERLAP = 0.20     # 实体重叠度权重（jieba分词+Jaccard相似系数）
+SCORE_WEIGHT_UNIQUENESS = 0.25  # 逻辑独特度权重（基于当前文章集的局部IDF）
+SCORE_WEIGHT_STRUCT = 0.20      # 结构重要性权重（检测数字、百分号、条款号等结构化特征）
+
+# Top K 截断数量（每个类别按加权总分降序排序后最多保留的条数）
+TOP_K_CC = 10       # 条件-结论对
+TOP_K_SCENE = 8     # 政策场景
+TOP_K_ASSERTION = 5 # 概念关系断言
+TOP_K_TIME = 5      # 时间约束
+
+# 中文停用词表（用于jieba分词后过滤虚词和常见词）
+STOPWORDS = set([
+    "的", "了", "是", "在", "和", "与", "或", "以及", "按照", "根据",
+    "对", "为", "由", "于", "之", "者", "被", "把", "将", "从", "到",
+    "上", "下", "中", "有", "个", "这", "那", "不", "也", "都", "其",
+    "等", "可", "应", "需", "要", "会", "能", "时", "如", "但", "并",
+    "而", "及", "该", "此", "以", "当", "则", "若", "还", "已", "所",
+    "优惠", "政策", "规定", "办法", "通知"
+])
+
 
 def _get_articles_full(question: str, max_rounds: int = 12) -> list:
     """多轮对话获取文章，返回每轮内容的列表（不丢弃中间轮次的文章原文）"""
@@ -655,10 +681,10 @@ def _validate_assertions(assertions):
 
     cleaned = [dict(a) for a in assertions if isinstance(a, dict)]
 
-    # C1: Remove self-referential
+    # C1: 删除自引用（entity_a 与 entity_b 相同时为无意义断言）
     cleaned = [a for a in cleaned if a.get('entity_a', '') != a.get('entity_b', '')]
 
-    # C2: Deduplicate, merge evidence
+    # C2: 去重合并（相同三元组合并为一条，拼接 evidence）
     seen = {}
     for a in cleaned:
         key = (a.get('entity_a', ''), a.get('entity_b', ''), a.get('relation_type', ''))
@@ -671,7 +697,7 @@ def _validate_assertions(assertions):
             seen[key] = dict(a)
     cleaned = list(seen.values())
 
-    # C3: synonym + mutually_exclusive → delete mutually_exclusive
+    # C3: 同义+互斥冲突（同一对概念既是 synonym 又是 mutually_exclusive 时，删除互斥）
     pair_rels = {}
     for a in cleaned:
         k = (a.get('entity_a', ''), a.get('entity_b', ''))
@@ -684,7 +710,7 @@ def _validate_assertions(assertions):
             and a.get('relation_type', '') == 'mutually_exclusive'
         )]
 
-    # C4: synonym + hypernym → delete hypernym
+    # C4: 同义+下位冲突（同一对概念既是 synonym 又是 hypernym 时，删除下位）
     conflict_c4 = {k for k, rels in pair_rels.items() if 'synonym' in rels and 'hypernym' in rels}
     if conflict_c4:
         cleaned = [a for a in cleaned if not (
@@ -692,7 +718,7 @@ def _validate_assertions(assertions):
             and a.get('relation_type', '') == 'hypernym'
         )]
 
-    # C5: Symmetric mutually_exclusive
+    # C5: 互斥对称补全（A 互斥 B 时自动补充 B 互斥 A）
     me_pairs = {(a.get('entity_a', ''), a.get('entity_b', ''))
                 for a in cleaned if a.get('relation_type', '') == 'mutually_exclusive'}
     existing = {(a.get('entity_a', ''), a.get('entity_b', '')) for a in cleaned}
@@ -705,23 +731,24 @@ def _validate_assertions(assertions):
                 'derived': True
             })
 
-    # C6: Evidence entity matching
-    validated = []
-    for a in cleaned:
-        if a.get('derived'):
-            validated.append(a)
-            continue
-        ev = a.get('evidence', '')
-        ea = a.get('entity_a', '')
-        eb = a.get('entity_b', '')
-        if (ea and ea in ev) or (eb and eb in ev):
-            validated.append(a)
-    cleaned = validated
+    # C6: 证据实体匹配（evidence 中必须包含 entity_a 或 entity_b 的原文，否则删除）— 已禁用
+    # validated = []
+    # for a in cleaned:
+    #     if a.get('derived'):
+    #         validated.append(a)
+    #         continue
+    #     ev = a.get('evidence', '')
+    #     ea = a.get('entity_a', '')
+    #     eb = a.get('entity_b', '')
+    #     if (ea and ea in ev) or (eb and eb in ev):
+    #         validated.append(a)
+    # cleaned = validated
 
-    # C7: Evidence length limit
-    for a in cleaned:
-        if len(a.get('evidence', '')) > 500:
-            a['evidence'] = a['evidence'][:200] + '...'
+    # C7: 证据长度截断（evidence 超过 500 字符时截断，保留完整内容用于Excel输出，截断版本仅用于内部比对）
+    # 已禁用截断，Excel中完整显示
+    # for a in cleaned:
+    #     if len(a.get('evidence', '')) > 500:
+    #         a['evidence'] = a['evidence'][:200] + '...'
 
     return cleaned
 
@@ -748,6 +775,221 @@ def _convert_constraints_to_text(cleaned_assertions):
         elif rt == 'property_of':
             texts.append(f'{LQ}{ea}{RQ}是{LQ}{eb}{RQ}的一个属性/参数，不等同于整体政策。')
     return texts
+
+
+# ===================== 多维评分过滤函数 =====================
+
+def _tokenize(text):
+    """jieba分词+停用词过滤，返回set（用于Jaccard计算）"""
+    import jieba
+    words = jieba.lcut(text)
+    return set(w for w in words if w not in STOPWORDS and (len(w) > 1 or w.isdigit()))
+
+
+def _tokenize_list(text):
+    """jieba分词+停用词过滤，返回list（保留词频，用于IDF加权平均计算）"""
+    import jieba
+    words = jieba.lcut(text)
+    return [w for w in words if w not in STOPWORDS and (len(w) > 1 or w.isdigit())]
+
+
+def _jaccard_similarity(set1, set2):
+    """计算两个集合的Jaccard相似系数"""
+    if not set1 and not set2:
+        return 0.0
+    inter = len(set1 & set2)
+    union = len(set1 | set2)
+    return inter / union if union > 0 else 0.0
+
+
+def _build_local_idf(article_texts):
+    """基于当前文章集构建局部IDF字典
+    article_texts: list[str]，每篇文章的文本
+    返回: dict{词: idf值}
+    """
+    import math
+    from collections import Counter
+    N = len(article_texts)
+    if N == 0:
+        return {}
+    df = Counter()
+    for text in article_texts:
+        words = _tokenize(text)
+        for w in words:
+            df[w] += 1
+    idf = {}
+    for w, doc_cnt in df.items():
+        val = math.log(N / (1 + doc_cnt))
+        idf[w] = max(val, 0.0)
+    return idf
+
+
+def _compute_avg_idf(product_text, idf_dict):
+    """计算产物文本的平均IDF（逻辑独特度）"""
+    words_list = _tokenize_list(product_text)
+    if not words_list:
+        return 0.0
+    total = sum(idf_dict.get(w, 0.0) for w in words_list)
+    return total / len(words_list)
+
+
+def _structural_score(text):
+    """结构重要性评分：检测百分号、条款号、年份、法规文号、金额等"""
+    import re
+    score = 0.0
+    if re.search(r'\d+(?:\.\d+)?%', text):
+        score += 0.3
+    if re.search(r'第[零一二三四五六七八九十百千万\d]+条', text):
+        score += 0.3
+    if re.search(r'\d{4}年', text):
+        score += 0.2
+    if re.search(r'(财税|国税|税务总局|公告)[\[\(]\d{4}[\d\]\)]', text):
+        score += 0.2
+    if re.search(r'\d{1,3}(?:万|亿)?元', text):
+        score += 0.1
+    return min(score, 1.0)
+
+
+def _normalize_scores(scores):
+    """线性归一化到[0,1]，所有值相同时返回0.5"""
+    if not scores:
+        return []
+    min_s = min(scores)
+    max_s = max(scores)
+    if max_s == min_s:
+        return [0.5] * len(scores)
+    return [(s - min_s) / (max_s - min_s) for s in scores]
+
+
+def _score_filter_products(user_query, article_texts, products):
+    """多维评分过滤主函数：计算四维分数→归一化→加权总分→排序截断TopK
+    返回 dict: {condition_pairs, policy_scenes, concept_relations, time_constraints}
+    """
+    import numpy as np
+
+    _log(f"[stability] 开始多维评分过滤，用户问题: {user_query[:100]}")
+
+    # 构建局部IDF
+    idf_dict = _build_local_idf(article_texts)
+    _log(f"[stability] 局部IDF构建完成，词典大小={len(idf_dict)}")
+
+    # 用户问题的分词和向量（只算一次）
+    q_tokens = _tokenize(user_query)
+    query_vec = _generate_embedding(user_query)
+
+    # 定义各类别的数据获取和文本生成规则
+    categories = {
+        'condition_pairs': {
+            'data': products.get('condition_pairs', []),
+            'text_fn': lambda p: p.get('condition', '') + ' → ' + p.get('conclusion', ''),
+            'top_k': TOP_K_CC,
+            'label': '条件-结论对'
+        },
+        'policy_scenes': {
+            'data': products.get('scene_enum', []),
+            'text_fn': lambda s: s if isinstance(s, str) else s.get('label', ''),
+            'top_k': TOP_K_SCENE,
+            'label': '政策场景',
+            'wrap': True  # 需要将字符串包装为dict
+        },
+        'concept_relations': {
+            'data': products.get('assertions_raw', []),
+            'text_fn': lambda r: f"{r.get('entity_a', '')} {r.get('entity_b', '')} {r.get('relation_type', '')}",
+            'top_k': TOP_K_ASSERTION,
+            'label': '概念断言'
+        },
+        'time_constraints': {
+            'data': products.get('time_constraints', []),
+            'text_fn': lambda t: f"{t.get('policy_name', '')} {t.get('constraint_type', '')} {t.get('condition', '')}",
+            'top_k': TOP_K_TIME,
+            'label': '时间约束'
+        }
+    }
+
+    result = {}
+    for cat_key, cat_cfg in categories.items():
+        items = cat_cfg['data']
+        label = cat_cfg['label']
+        top_k = cat_cfg['top_k']
+
+        # 政策场景需要包装
+        if cat_cfg.get('wrap') and items and isinstance(items[0], str):
+            items = [{'label': s, '_original': s} for s in items]
+
+        if not items:
+            _log(f"[stability] {label}: 无数据，跳过")
+            result[cat_key] = []
+            continue
+
+        _log(f"[stability] {label}: 评分前={len(items)}条")
+
+        # 批量预计算向量
+        texts = [cat_cfg['text_fn'](item) for item in items]
+        vec_cache = _batch_embeddings(texts)
+
+        # 计算四维原始分数
+        sim_scores = []
+        overlap_scores = []
+        uniqueness_scores = []
+        struct_scores = []
+
+        for i, (item, text) in enumerate(zip(items, texts)):
+            # 语义相关性
+            vec = vec_cache.get(text)
+            sim = float(np.dot(query_vec, vec)) if vec else 0.0
+            sim_scores.append(sim)
+
+            # 实体重叠度
+            p_tokens = _tokenize(text)
+            overlap = _jaccard_similarity(q_tokens, p_tokens)
+            overlap_scores.append(overlap)
+
+            # 逻辑独特度
+            avg_idf = _compute_avg_idf(text, idf_dict)
+            uniqueness_scores.append(avg_idf)
+
+            # 结构重要性
+            struct = _structural_score(text)
+            struct_scores.append(struct)
+
+        # 归一化（所有维度统一归一化）
+        sim_norm = _normalize_scores(sim_scores)
+        overlap_norm = _normalize_scores(overlap_scores)
+        uniqueness_norm = _normalize_scores(uniqueness_scores)
+        struct_norm = _normalize_scores(struct_scores)
+
+        # 计算加权总分并附加到item
+        for i, item in enumerate(items):
+            item['score_sim'] = round(sim_scores[i], 4)
+            item['score_overlap'] = round(overlap_scores[i], 4)
+            item['score_uniqueness'] = round(uniqueness_scores[i], 4)
+            item['score_struct'] = round(struct_scores[i], 4)
+            item['total_score'] = round(
+                SCORE_WEIGHT_SIM * sim_norm[i] +
+                SCORE_WEIGHT_OVERLAP * overlap_norm[i] +
+                SCORE_WEIGHT_UNIQUENESS * uniqueness_norm[i] +
+                SCORE_WEIGHT_STRUCT * struct_norm[i], 4
+            )
+
+        # 按总分降序排序
+        sorted_items = sorted(items, key=lambda x: x['total_score'], reverse=True)
+        kept = sorted_items[:top_k]
+
+        _log(f"[stability] {label}: 评分后保留={len(kept)}条 (TopK={top_k})")
+        for rank, k in enumerate(sorted_items, 1):
+            status = "保留" if rank <= top_k else "截断"
+            _log(f"[stability]   [{rank}] {status} 总分={k['total_score']} "
+                 f"(语义={k['score_sim']}, 重叠={k['score_overlap']}, "
+                 f"独特={k['score_uniqueness']}, 结构={k['score_struct']}) "
+                 f"文本={cat_cfg['text_fn'](k)[:60]}")
+
+        # 政策场景需要解包回字符串
+        if cat_cfg.get('wrap'):
+            kept = [k.get('_original', k.get('label', '')) for k in kept]
+
+        result[cat_key] = kept
+
+    return result
 
 
 def _assemble_final_prompt(user_query, condition_pairs, scene_enum, constraint_texts, time_constraints):
@@ -784,7 +1026,7 @@ def _assemble_final_prompt(user_query, condition_pairs, scene_enum, constraint_t
             aids = cc.get('article_ids', cc.get('article_id', ''))
             if isinstance(aids, list):
                 aids = ', '.join(str(a) for a in aids)
-            cc_lines.append(f"- 条件：{cond}\n  结论：{conc}\n  来源：{aids}")
+            cc_lines.append(f"- 条件：{cond} → 结论：{conc}")
         cc_text = "\n".join(cc_lines)
     else:
         cc_text = "未抽取到条件-结论对"
@@ -794,21 +1036,23 @@ def _assemble_final_prompt(user_query, condition_pairs, scene_enum, constraint_t
 ## 用户问题
 {user_query}
 
-## 必须检查的政策场景（不要遗漏任何一项）
+## 必须检查的政策场景
 {scene_list}
 
-## 逻辑约束（必须遵守）
+## 核心法规指引与逻辑提示（非硬约束）
+**注意：** 以下为法规原文摘要或提示，请自行结合上下文分析，不得机械套用。当存在多条规定时，应依据法规层级、发布时间和专门性判断优先级。
+
 {constraints}
 
 ## 时间适用性约束
 {time_text}
 
-## 可用的条件-结论对（推理依据）
+## 可用的条件-结论对
 {cc_text}
 
 ## 回答步骤
 1. 对【必须检查的政策场景】中的每一个场景，判断是否适用，并引用【可用的条件-结论对】中的对应条目。
-2. 检查政策之间是否存在互斥或叠加限制，依据【逻辑约束】。
+2. 检查政策之间是否存在互斥或叠加限制，结合【核心法规指引与逻辑提示】分析。
 3. 最终输出必须：
    - 列出所有适用的场景及其结论。
    - 如果有多种适用情况，明确说明它们是否可以同时享受，若不能则指出优先级。
@@ -1142,9 +1386,50 @@ def stability_process():
                                     f"断言={len(products['filtered_assertions']) if isinstance(products['filtered_assertions'], list) else '未启用'}, "
                                     f"时间={len(products['filtered_time_constraints']) if isinstance(products['filtered_time_constraints'], list) else '未启用'}"})
 
+            # ---- Step 2e: 多维评分过滤（语义+实体重叠+逻辑独特度+结构重要性）----
+            yield _sse({'type': 'step_start', 'question_idx': q_idx,
+                        'step_id': 'score_filtering', 'step_label': '多维评分过滤(按权重排序截断)',
+                        'system_prompt': '(四维评分排序，不调用LLM)' if SCORE_FILTER_ENABLED else '(已禁用)',
+                        'user_prompt': question[:200]})
+            if SCORE_FILTER_ENABLED:
+                try:
+                    score_filtered = _score_filter_products(question, article_parts, products)
+                    products['score_filtered_condition_pairs'] = score_filtered['condition_pairs']
+                    products['score_filtered_scene_enum'] = score_filtered['policy_scenes']
+                    products['score_filtered_assertions'] = score_filtered['concept_relations']
+                    products['score_filtered_time_constraints'] = score_filtered['time_constraints']
+                    _log(f"[stability] row={row_num} 多维评分过滤完成: "
+                         f"条件-结论={len(score_filtered['condition_pairs'])}条, "
+                         f"场景={len(score_filtered['policy_scenes'])}个, "
+                         f"断言={len(score_filtered['concept_relations'])}条, "
+                         f"时间={len(score_filtered['time_constraints'])}条")
+                except Exception as e:
+                    _log(f"[stability] row={row_num} 多维评分过滤失败，使用合并后数据: {e}")
+                    products['score_filtered_condition_pairs'] = products['condition_pairs']
+                    products['score_filtered_scene_enum'] = products['scene_enum']
+                    products['score_filtered_assertions'] = products['assertions_raw']
+                    products['score_filtered_time_constraints'] = products['time_constraints']
+            else:
+                _log(f"[stability] row={row_num} 多维评分过滤已禁用(SCORE_FILTER_ENABLED=False)")
+                products['score_filtered_condition_pairs'] = '权重过滤逻辑未启用'
+                products['score_filtered_scene_enum'] = '权重过滤逻辑未启用'
+                products['score_filtered_assertions'] = '权重过滤逻辑未启用'
+                products['score_filtered_time_constraints'] = '权重过滤逻辑未启用'
+            yield _sse({'type': 'step_complete', 'question_idx': q_idx,
+                        'step_id': 'score_filtering', 'step_label': '多维评分过滤(按权重排序截断)',
+                        'response': f"权重过滤后: CC={len(products['score_filtered_condition_pairs']) if isinstance(products['score_filtered_condition_pairs'], list) else '未启用'}, "
+                                    f"场景={len(products['score_filtered_scene_enum']) if isinstance(products['score_filtered_scene_enum'], list) else '未启用'}, "
+                                    f"断言={len(products['score_filtered_assertions']) if isinstance(products['score_filtered_assertions'], list) else '未启用'}, "
+                                    f"时间={len(products['score_filtered_time_constraints']) if isinstance(products['score_filtered_time_constraints'], list) else '未启用'}"})
+
             # ---- Step 3: Validate assertions ----
-            # 当过滤启用时用过滤后数据，禁用时用合并后数据
-            if FILTER_ENABLED:
+            # 数据源优先级：权重过滤 > 阈值过滤 > 合并后
+            if SCORE_FILTER_ENABLED and isinstance(products.get('score_filtered_condition_pairs'), list):
+                cc_for_prompt = products['score_filtered_condition_pairs']
+                scene_for_prompt = products['score_filtered_scene_enum']
+                assertion_for_validate = products['score_filtered_assertions']
+                tc_for_prompt = products['score_filtered_time_constraints']
+            elif FILTER_ENABLED:
                 cc_for_prompt = products['filtered_condition_pairs']
                 scene_for_prompt = products['filtered_scene_enum']
                 assertion_for_validate = products['filtered_assertions']
@@ -1222,16 +1507,20 @@ def stability_process():
                 'raw_condition_pairs': all_cc_pairs,
                 'condition_pairs': products['condition_pairs'],
                 'filtered_condition_pairs': products.get('filtered_condition_pairs', []),
+                'score_filtered_condition_pairs': products.get('score_filtered_condition_pairs', []),
                 'raw_scene_enum': all_scenes,
                 'scene_enum': products['scene_enum'],
                 'filtered_scene_enum': products.get('filtered_scene_enum', []),
+                'score_filtered_scene_enum': products.get('score_filtered_scene_enum', []),
                 'raw_assertions': all_relations,
                 'assertions_cleaned': products['assertions_cleaned'],
                 'filtered_assertions': products.get('filtered_assertions', []),
+                'score_filtered_assertions': products.get('score_filtered_assertions', []),
                 'constraint_texts': products['constraint_texts'],
                 'raw_time_constraints': all_time_constraints,
                 'time_constraints': products['time_constraints'],
                 'filtered_time_constraints': products.get('filtered_time_constraints', []),
+                'score_filtered_time_constraints': products.get('score_filtered_time_constraints', []),
                 'final_prompt': products['final_prompt'],
                 'final_answer': products['final_answer']
             })
@@ -1272,19 +1561,23 @@ def _save_results(results, output_path):
         ('问题', 50),
         ('提示词(B列)', 40),
         ('文章内容', 80),
-        ('条件-结论对(处理前)', 60),
-        ('条件-结论对(处理后)', 60),
-        ('条件-结论对(过滤后)', 60),
-        ('政策场景(处理前)', 30),
-        ('政策场景(处理后)', 30),
-        ('政策场景(过滤后)', 30),
-        ('概念断言(处理前)', 50),
-        ('概念断言(清洗后)', 50),
-        ('概念断言(过滤后)', 50),
-        ('概念约束文本', 40),
-        ('时间约束(处理前)', 40),
-        ('时间约束(处理后)', 40),
-        ('时间约束(过滤后)', 40),
+        ('1.条件-结论对(处理前)', 60),
+        ('2.条件-结论对(处理后)', 60),
+        ('3.条件-结论对(过滤后)', 60),
+        ('4.条件-结论对(按权重过滤)', 60),
+        ('1.政策场景(处理前)', 30),
+        ('2.政策场景(处理后)', 30),
+        ('3.政策场景(过滤后)', 30),
+        ('4.政策场景(按权重过滤)', 30),
+        ('1.概念断言(处理前)', 50),
+        ('2.概念断言(过滤后)', 50),
+        ('3.概念断言(按权重过滤)', 50),
+        ('4.概念断言(清洗后)', 50),
+        ('5.概念约束文本', 40),
+        ('1.时间约束(处理前)', 40),
+        ('2.时间约束(处理后)', 40),
+        ('3.时间约束(过滤后)', 40),
+        ('4.时间约束(按权重过滤)', 40),
         ('最终提示词', 80),
         ('最终回答', 80)
     ]
@@ -1304,24 +1597,28 @@ def _save_results(results, output_path):
             return json.dumps(val, ensure_ascii=False, indent=2)
 
         values = [
-            r['question'],
-            r.get('prompt', ''),
-            r.get('articles_text', ''),
-            json.dumps(r.get('raw_condition_pairs', []), ensure_ascii=False, indent=2),
-            json.dumps(r.get('condition_pairs', []), ensure_ascii=False, indent=2),
-            _fmt_filtered(r.get('filtered_condition_pairs', [])),
-            json.dumps(r.get('raw_scene_enum', []), ensure_ascii=False),
-            json.dumps(r.get('scene_enum', []), ensure_ascii=False),
-            _fmt_filtered(r.get('filtered_scene_enum', [])),
-            json.dumps(r.get('raw_assertions', []), ensure_ascii=False, indent=2),
-            json.dumps(r.get('assertions_cleaned', []), ensure_ascii=False, indent=2),
-            _fmt_filtered(r.get('filtered_assertions', [])),
-            '\n'.join(r.get('constraint_texts', [])),
-            json.dumps(r.get('raw_time_constraints', []), ensure_ascii=False, indent=2),
-            json.dumps(r.get('time_constraints', []), ensure_ascii=False, indent=2),
-            _fmt_filtered(r.get('filtered_time_constraints', [])),
-            r.get('final_prompt', ''),
-            r.get('final_answer', '')
+            r['question'],                                                              # 1.问题
+            r.get('prompt', ''),                                                        # 2.提示词(B列)
+            r.get('articles_text', ''),                                                 # 3.文章内容
+            json.dumps(r.get('raw_condition_pairs', []), ensure_ascii=False, indent=2), # 4.条件-结论对(处理前)
+            json.dumps(r.get('condition_pairs', []), ensure_ascii=False, indent=2),     # 5.条件-结论对(处理后)
+            _fmt_filtered(r.get('filtered_condition_pairs', [])),                       # 6.条件-结论对(过滤后)
+            _fmt_filtered(r.get('score_filtered_condition_pairs', [])),                 # 7.条件-结论对(按权重过滤)
+            json.dumps(r.get('raw_scene_enum', []), ensure_ascii=False),                # 8.政策场景(处理前)
+            json.dumps(r.get('scene_enum', []), ensure_ascii=False),                    # 9.政策场景(处理后)
+            _fmt_filtered(r.get('filtered_scene_enum', [])),                            # 10.政策场景(过滤后)
+            _fmt_filtered(r.get('score_filtered_scene_enum', [])),                      # 11.政策场景(按权重过滤)
+            json.dumps(r.get('raw_assertions', []), ensure_ascii=False, indent=2),      # 12.概念断言(处理前)
+            _fmt_filtered(r.get('filtered_assertions', [])),                            # 13.概念断言(过滤后)
+            _fmt_filtered(r.get('score_filtered_assertions', [])),                      # 14.概念断言(按权重过滤)
+            json.dumps(r.get('assertions_cleaned', []), ensure_ascii=False, indent=2),  # 15.概念断言(清洗后)
+            '\n'.join(r.get('constraint_texts', [])),                                   # 16.概念约束文本
+            json.dumps(r.get('raw_time_constraints', []), ensure_ascii=False, indent=2),# 17.时间约束(处理前)
+            json.dumps(r.get('time_constraints', []), ensure_ascii=False, indent=2),    # 18.时间约束(处理后)
+            _fmt_filtered(r.get('filtered_time_constraints', [])),                      # 19.时间约束(过滤后)
+            _fmt_filtered(r.get('score_filtered_time_constraints', [])),                # 20.时间约束(按权重过滤)
+            r.get('final_prompt', ''),                                                  # 21.最终提示词
+            r.get('final_answer', '')                                                   # 22.最终回答
         ]
         for col, val in enumerate(values, 1):
             cell = ws.cell(row=row_idx, column=col, value=val)
