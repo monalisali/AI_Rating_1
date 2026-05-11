@@ -55,17 +55,36 @@ SPECIFIC_KEYWORDS = [
 # 是否启用多维评分过滤（语义+实体重叠+逻辑独特度+结构重要性），False时"按权重过滤"栏位填"权重过滤逻辑未启用"
 SCORE_FILTER_ENABLED = True
 
-# 四维评分权重（总和应为1.0）
-SCORE_WEIGHT_SIM = 0.35         # 语义相关性权重（BGE-M3余弦相似度）
-SCORE_WEIGHT_OVERLAP = 0.20     # 实体重叠度权重（jieba分词+Jaccard相似系数）
-SCORE_WEIGHT_UNIQUENESS = 0.25  # 逻辑独特度权重（基于当前文章集的局部IDF）
-SCORE_WEIGHT_STRUCT = 0.20      # 结构重要性权重（检测数字、百分号、条款号等结构化特征）
+# 条件-结论对评分权重（信息丰富的长文本，适合多维评分）
+SCORE_WEIGHT_CC_SIM = 0.7          # 语义相关性（BGE-M3余弦相似度）
+SCORE_WEIGHT_CC_OVERLAP = 0.1      # 实体重叠度（jieba分词+Jaccard相似系数）
+SCORE_WEIGHT_CC_UNIQUENESS = 0.1   # 逻辑独特度（基于当前文章集的局部IDF）
+SCORE_WEIGHT_CC_STRUCT = 0.1       # 结构重要性（检测数字、百分号、条款号等结构化特征）
+
+# 政策场景评分权重（短文本2-6个汉字，不使用逻辑独特度）
+SCORE_WEIGHT_SCENE_SIM = 0.8       # 语义相关性
+SCORE_WEIGHT_SCENE_OVERLAP = 0.1   # 实体重叠度
+SCORE_WEIGHT_SCENE_STRUCT = 0.1    # 结构重要性
+
+# 时间约束评分权重（年份等结构信息很重要，不使用实体重叠）
+SCORE_WEIGHT_TIME_SIM = 0.5        # 语义相关性
+SCORE_WEIGHT_TIME_UNIQUENESS = 0.2 # 逻辑独特度
+SCORE_WEIGHT_TIME_STRUCT = 0.3     # 结构重要性
+
+# 概念断言关系类型优先级加分（断言评分 = 语义相似度 + 关系加分）
+RELATION_BONUS = {
+    "related_not_equal": 0.3,   # 相关但不可等同，信息量大
+    "succession": 0.3,          # 替代关系，需要注意过渡期
+    "mutually_exclusive": 0.2,  # 互斥关系，防止冲突
+    "synonym": 0.0,             # 等价关系，信息量一般
+    "property_of": 0.0          # 属性关系，信息量一般
+}
 
 # Top K 截断数量（每个类别按加权总分降序排序后最多保留的条数）
-TOP_K_CC = 10       # 条件-结论对
-TOP_K_SCENE = 8     # 政策场景
-TOP_K_ASSERTION = 5 # 概念关系断言
-TOP_K_TIME = 5      # 时间约束
+TOP_K_CC = 15        # 条件-结论对
+TOP_K_SCENE = 10     # 政策场景
+TOP_K_ASSERTION = 10  # 概念关系断言
+TOP_K_TIME = 6       # 时间约束
 
 # 法规文号前缀（用于结构重要性评分中匹配法规文号，如 国发[2007]39号、财税[2009]69号）
 DOC_NUMBER_PREFIXES = ["财税", "国税", "税务总局", "公告", "国发"]
@@ -867,7 +886,12 @@ def _normalize_scores(scores):
 
 
 def _score_filter_products(user_query, article_texts, products):
-    """多维评分过滤主函数：计算四维分数→归一化→加权总分→排序截断TopK
+    """多维评分过滤主函数：分类型评分→排序截断TopK
+    每种产物类型使用不同的评分公式和权重：
+    - 条件-结论对：语义+重叠+独特度+结构
+    - 概念断言：语义相似度+关系类型加分
+    - 时间约束：语义+独特度+结构（无重叠）
+    - 政策场景：语义+重叠+结构（无独特度）
     返回 dict: {condition_pairs, policy_scenes, concept_relations, time_constraints}
     """
     import numpy as np
@@ -882,101 +906,61 @@ def _score_filter_products(user_query, article_texts, products):
     q_tokens = _tokenize(user_query)
     query_vec = _generate_embedding(user_query)
 
-    # 定义各类别的数据获取和文本生成规则
-    categories = {
-        'condition_pairs': {
-            'data': products.get('condition_pairs', []),
-            'text_fn': lambda p: p.get('condition', '') + ' → ' + p.get('conclusion', ''),
-            'top_k': TOP_K_CC,
-            'label': '条件-结论对'
-        },
-        'policy_scenes': {
-            'data': products.get('scene_enum', []),
-            'text_fn': lambda s: s if isinstance(s, str) else s.get('label', ''),
-            'top_k': TOP_K_SCENE,
-            'label': '政策场景',
-            'wrap': True  # 需要将字符串包装为dict
-        },
-        'concept_relations': {
-            'data': products.get('assertions_raw', []),
-            'text_fn': lambda r: f"{r.get('entity_a', '')} {r.get('entity_b', '')} {r.get('relation_type', '')}",
-            'top_k': TOP_K_ASSERTION,
-            'label': '概念断言'
-        },
-        'time_constraints': {
-            'data': products.get('time_constraints', []),
-            'text_fn': lambda t: f"{t.get('policy_name', '')} {t.get('constraint_type', '')} {t.get('condition', '')}",
-            'top_k': TOP_K_TIME,
-            'label': '时间约束'
-        }
-    }
-
-    result = {}
-    for cat_key, cat_cfg in categories.items():
-        items = cat_cfg['data']
-        label = cat_cfg['label']
-        top_k = cat_cfg['top_k']
-
-        # 政策场景需要包装
-        if cat_cfg.get('wrap') and items and isinstance(items[0], str):
-            items = [{'label': s, '_original': s} for s in items]
-
+    # ---- 通用多维评分函数 ----
+    def _score_multi_dim(items, text_fn, weights, top_k, label):
+        """多维评分：仅计算权重非0的维度，仅对IDF归一化→加权总分→排序截断"""
         if not items:
             _log(f"[stability] {label}: 无数据，跳过")
-            result[cat_key] = []
-            continue
+            return []
 
         _log(f"[stability] {label}: 评分前={len(items)}条")
 
+        w_sim = weights.get('sim', 0)
+        w_overlap = weights.get('overlap', 0)
+        w_uniqueness = weights.get('uniqueness', 0)
+        w_struct = weights.get('struct', 0)
+
         # 批量预计算向量
-        texts = [cat_cfg['text_fn'](item) for item in items]
+        texts = [text_fn(item) for item in items]
         vec_cache = _batch_embeddings(texts)
 
-        # 计算四维原始分数
-        sim_scores = []
-        overlap_scores = []
-        uniqueness_scores = []
-        struct_scores = []
+        sim_scores, overlap_scores, uniqueness_scores, struct_scores = [], [], [], []
 
         for i, (item, text) in enumerate(zip(items, texts)):
-            # 语义相关性
-            vec = vec_cache.get(text)
-            sim = float(np.dot(query_vec, vec)) if vec else 0.0
-            sim_scores.append(sim)
+            if w_sim > 0:
+                vec = vec_cache.get(text)
+                sim = float(np.dot(query_vec, vec)) if vec else 0.0
+                sim_scores.append(sim)
+            if w_overlap > 0:
+                p_tokens = _tokenize(text)
+                overlap = _jaccard_similarity(q_tokens, p_tokens)
+                overlap_scores.append(overlap)
+            if w_uniqueness > 0:
+                avg_idf = _compute_avg_idf(text, idf_dict)
+                uniqueness_scores.append(avg_idf)
+            if w_struct > 0:
+                struct = _structural_score(text)
+                struct_scores.append(struct)
 
-            # 实体重叠度
-            p_tokens = _tokenize(text)
-            overlap = _jaccard_similarity(q_tokens, p_tokens)
-            overlap_scores.append(overlap)
+        # 仅IDF需要归一化（其他维度已在[0,1]范围内）
+        uniqueness_norm = _normalize_scores(uniqueness_scores) if w_uniqueness > 0 else []
 
-            # 逻辑独特度
-            avg_idf = _compute_avg_idf(text, idf_dict)
-            uniqueness_scores.append(avg_idf)
-
-            # 结构重要性
-            struct = _structural_score(text)
-            struct_scores.append(struct)
-
-        # 归一化（所有维度统一归一化）
-        sim_norm = _normalize_scores(sim_scores)
-        overlap_norm = _normalize_scores(overlap_scores)
-        uniqueness_norm = _normalize_scores(uniqueness_scores)
-        struct_norm = _normalize_scores(struct_scores)
-
-        # 计算加权总分并附加到item
         for i, item in enumerate(items):
-            item['score_sim'] = round(sim_scores[i], 4)
-            item['score_overlap'] = round(overlap_scores[i], 4)
-            item['score_uniqueness'] = round(uniqueness_scores[i], 4)
-            item['score_struct'] = round(struct_scores[i], 4)
-            item['total_score'] = round(
-                SCORE_WEIGHT_SIM * sim_norm[i] +
-                SCORE_WEIGHT_OVERLAP * overlap_norm[i] +
-                SCORE_WEIGHT_UNIQUENESS * uniqueness_norm[i] +
-                SCORE_WEIGHT_STRUCT * struct_norm[i], 4
-            )
+            total = 0.0
+            if w_sim > 0:
+                item['score_sim'] = round(sim_scores[i], 4)
+                total += w_sim * sim_scores[i]
+            if w_overlap > 0:
+                item['score_overlap'] = round(overlap_scores[i], 4)
+                total += w_overlap * overlap_scores[i]
+            if w_uniqueness > 0:
+                item['score_uniqueness'] = round(uniqueness_scores[i], 4)
+                total += w_uniqueness * uniqueness_norm[i]
+            if w_struct > 0:
+                item['score_struct'] = round(struct_scores[i], 4)
+                total += w_struct * struct_scores[i]
+            item['total_score'] = round(total, 4)
 
-        # 按总分降序排序
         sorted_items = sorted(items, key=lambda x: x['total_score'], reverse=True)
         kept = sorted_items[:top_k]
 
@@ -984,15 +968,78 @@ def _score_filter_products(user_query, article_texts, products):
         for rank, k in enumerate(sorted_items, 1):
             status = "保留" if rank <= top_k else "截断"
             _log(f"[stability]   [{rank}] {status} 总分={k['total_score']} "
-                 f"(语义={k['score_sim']}, 重叠={k['score_overlap']}, "
-                 f"独特={k['score_uniqueness']}, 结构={k['score_struct']}) "
-                 f"文本={cat_cfg['text_fn'](k)[:60]}")
+                 f"(语义={k.get('score_sim', '-')}, 重叠={k.get('score_overlap', '-')}, "
+                 f"独特={k.get('score_uniqueness', '-')}, 结构={k.get('score_struct', '-')}) "
+                 f"文本={text_fn(k)}")
 
-        # 政策场景需要解包回字符串
-        if cat_cfg.get('wrap'):
-            kept = [k.get('_original', k.get('label', '')) for k in kept]
+        return kept
 
-        result[cat_key] = kept
+    result = {}
+
+    # ---- 1. 条件-结论对（多维评分：语义+重叠+独特度+结构） ----
+    cc_items = [dict(p) for p in products.get('condition_pairs', [])]
+    result['condition_pairs'] = _score_multi_dim(
+        cc_items,
+        lambda p: p.get('condition', '') + ' → ' + p.get('conclusion', ''),
+        {'sim': SCORE_WEIGHT_CC_SIM, 'overlap': SCORE_WEIGHT_CC_OVERLAP,
+         'uniqueness': SCORE_WEIGHT_CC_UNIQUENESS, 'struct': SCORE_WEIGHT_CC_STRUCT},
+        TOP_K_CC, '条件-结论对')
+
+    # ---- 2. 概念关系断言（语义相似度 + 关系类型加分） ----
+    rel_items = [dict(r) for r in products.get('assertions_raw', [])]
+    if not rel_items:
+        _log(f"[stability] 概念断言: 无数据，跳过")
+        result['concept_relations'] = []
+    else:
+        _log(f"[stability] 概念断言: 评分前={len(rel_items)}条")
+        _assertion_text_fn = lambda r: (f"{r.get('entity_a', '')} {r.get('entity_b', '')}"
+                                         + (f" {r.get('evidence', '')}" if r.get('evidence') else ''))
+        rel_texts = [_assertion_text_fn(r) for r in rel_items]
+        rel_vec_cache = _batch_embeddings(rel_texts)
+
+        for item, text in zip(rel_items, rel_texts):
+            vec = rel_vec_cache.get(text)
+            sem = float(np.dot(query_vec, vec)) if vec else 0.0
+            bonus = RELATION_BONUS.get(item.get('relation_type', ''), 0.0)
+            item['score_sim'] = round(sem, 4)
+            item['score_bonus'] = round(bonus, 4)
+            item['total_score'] = round(sem + bonus, 4)
+
+        sorted_rels = sorted(rel_items, key=lambda x: x['total_score'], reverse=True)
+        rel_kept = sorted_rels[:TOP_K_ASSERTION]
+
+        _log(f"[stability] 概念断言: 评分后保留={len(rel_kept)}条 (TopK={TOP_K_ASSERTION})")
+        for rank, k in enumerate(sorted_rels, 1):
+            status = "保留" if rank <= TOP_K_ASSERTION else "截断"
+            _log(f"[stability]   [{rank}] {status} 总分={k['total_score']} "
+                 f"(语义={k['score_sim']}, 加分={k['score_bonus']}, "
+                 f"类型={k.get('relation_type', '')}) 文本={_assertion_text_fn(k)}")
+
+        result['concept_relations'] = rel_kept
+
+    # ---- 3. 时间约束（多维评分：语义+独特度+结构，不使用重叠） ----
+    tc_items = [dict(t) for t in products.get('time_constraints', [])]
+    result['time_constraints'] = _score_multi_dim(
+        tc_items,
+        lambda t: f"{t.get('policy_name', '')} {t.get('constraint_type', '')} {t.get('condition', '')}",
+        {'sim': SCORE_WEIGHT_TIME_SIM, 'uniqueness': SCORE_WEIGHT_TIME_UNIQUENESS,
+         'struct': SCORE_WEIGHT_TIME_STRUCT},
+        TOP_K_TIME, '时间约束')
+
+    # ---- 4. 政策场景（多维评分：语义+重叠+结构，不使用独特度） ----
+    scenes_raw = products.get('scene_enum', [])
+    if not scenes_raw:
+        _log(f"[stability] 政策场景: 无数据，跳过")
+        result['policy_scenes'] = []
+    else:
+        scene_items = [{'label': s, '_original': s} for s in scenes_raw]
+        scene_kept = _score_multi_dim(
+            scene_items,
+            lambda s: s['_original'],
+            {'sim': SCORE_WEIGHT_SCENE_SIM, 'overlap': SCORE_WEIGHT_SCENE_OVERLAP,
+             'struct': SCORE_WEIGHT_SCENE_STRUCT},
+            TOP_K_SCENE, '政策场景')
+        result['policy_scenes'] = [s['_original'] for s in scene_kept]
 
     return result
 
@@ -1049,11 +1096,11 @@ def _assemble_final_prompt(user_query, condition_pairs, scene_enum, constraint_t
 
 {constraints}
 
-## 时间适用性约束
-{time_text}
-
 ## 可用的条件-结论对
 {cc_text}
+
+## 时间适用性约束
+{time_text}
 
 ## 回答步骤
 1. 对【必须检查的政策场景】中的每一个场景，判断是否适用，并引用【可用的条件-结论对】中的对应条目。
