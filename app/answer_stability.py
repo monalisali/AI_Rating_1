@@ -100,15 +100,18 @@ STOPWORDS = set([
 ])
 
 
-def _get_articles_full(question: str, max_rounds: int = 12) -> list:
-    """多轮对话获取文章，返回每轮内容的列表（不丢弃中间轮次的文章原文）"""
+def _get_articles_full(question: str, max_rounds: int = 12, system_prompt: str = "") -> list:
+    """多轮对话获取文章，返回每轮内容的列表（不丢弃中间轮次的文章原文）
+    question: 搜索关键词（B列提示词或A列问题）
+    system_prompt: 可选，用户原始问题（A列），通过custom_system_prompt传给API
+    """
     session_id = ""
     current_message = question
     all_parts = []
 
     for round_i in range(max_rounds):
         try:
-            api_response, session_id = request_api(current_message, session_id)
+            api_response, session_id = request_api(current_message, session_id, custom_system_prompt=system_prompt)
             content = parse_response(api_response)['full_content']
             if content and content.strip():
                 all_parts.append(content)
@@ -1045,7 +1048,7 @@ def _score_filter_products(user_query, article_texts, products):
 
 
 def _assemble_final_prompt(user_query, condition_pairs, scene_enum, constraint_texts, time_constraints):
-    """Assemble the final prompt from all skill products"""
+    """以Prompt.md为模板，将4个Skill产物填入对应章节后返回完整提示词"""
 
     # Scene enumeration
     if isinstance(scene_enum, list) and scene_enum:
@@ -1055,6 +1058,17 @@ def _assemble_final_prompt(user_query, condition_pairs, scene_enum, constraint_t
 
     # Constraint texts
     constraints = "\n".join(f"- {t}" for t in constraint_texts) if constraint_texts else "无特殊概念约束"
+
+    # Condition-conclusion pairs
+    if isinstance(condition_pairs, list) and condition_pairs:
+        cc_lines = []
+        for cc in condition_pairs:
+            cond = cc.get('condition', '')
+            conc = cc.get('conclusion', '')
+            cc_lines.append(f"- 条件：{cond} → 结论：{conc}")
+        cc_text = "\n".join(cc_lines)
+    else:
+        cc_text = "未抽取到条件-结论对"
 
     # Time constraints
     if isinstance(time_constraints, list) and time_constraints:
@@ -1069,48 +1083,21 @@ def _assemble_final_prompt(user_query, condition_pairs, scene_enum, constraint_t
     else:
         time_text = "无特殊时间约束"
 
-    # Condition-conclusion pairs
-    if isinstance(condition_pairs, list) and condition_pairs:
-        cc_lines = []
-        for i, cc in enumerate(condition_pairs, 1):
-            cond = cc.get('condition', '')
-            conc = cc.get('conclusion', '')
-            aids = cc.get('article_ids', cc.get('article_id', ''))
-            if isinstance(aids, list):
-                aids = ', '.join(str(a) for a in aids)
-            cc_lines.append(f"- 条件：{cond} → 结论：{conc}")
-        cc_text = "\n".join(cc_lines)
-    else:
-        cc_text = "未抽取到条件-结论对"
+    # 读取Prompt.md模板，按{{}}分割后填入4个Skill产物
+    template_path = os.path.join(ROOT_DIR, 'Prompt.md')
+    with open(template_path, 'r', encoding='utf-8') as f:
+        template = f.read()
 
-    return f"""你是一个税务问答专家。请严格按以下结构和约束回答问题。
+    parts = template.split('{{}}')
+    # parts: [模板前半(到section5之前), section5-6之间, section6-7之间, section7-8之间, 模板后半(section8之后)]
+    skill_outputs = [scene_list, constraints, cc_text, time_text]
 
-## 用户问题
-{user_query}
+    filled = parts[0]
+    for i, output in enumerate(skill_outputs):
+        filled += output
+        filled += parts[i + 1]
 
-## 必须检查的政策场景
-{scene_list}
-
-## 核心法规指引与逻辑提示（非硬约束）
-**注意：** 以下为法规原文摘要或提示，请自行结合上下文分析，不得机械套用。当存在多条规定时，应依据法规层级、发布时间和专门性判断优先级。
-
-{constraints}
-
-## 可用的条件-结论对
-{cc_text}
-
-## 时间适用性约束
-{time_text}
-
-## 回答步骤
-1. 对【必须检查的政策场景】中的每一个场景，判断是否适用，并引用【可用的条件-结论对】中的对应条目。
-2. 检查政策之间是否存在互斥或叠加限制，结合【核心法规指引与逻辑提示】分析。
-3. 最终输出必须：
-   - 列出所有适用的场景及其结论。
-   - 如果有多种适用情况，明确说明它们是否可以同时享受，若不能则指出优先级。
-   - 给出最终的汇总答案。
-
-请现在开始回答。"""
+    return filled
 
 
 # ===================== Routes =====================
@@ -1254,7 +1241,7 @@ def stability_process():
                             'step_id': 'articles', 'step_label': '获取文章内容(知识库API)',
                             'system_prompt': '(通过5007知识库API获取)', 'user_prompt': kb_prompt or question})
                 try:
-                    article_parts = _get_articles_full(kb_prompt or question)
+                    article_parts = _get_articles_full(question, system_prompt=kb_prompt or question)
                     articles_full_text = '\n\n'.join(article_parts)
                     products['articles_text'] = articles_full_text
                     for pi, part in enumerate(article_parts):

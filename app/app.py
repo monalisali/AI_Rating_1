@@ -29,6 +29,12 @@ key: sk-wKJ3gwHNsyZL3oZDZrOMYlQbLbCxY8QpLDxRYMqCGp9Ms4fz
 model:
 - bedrock.anthropic.claude-opus-4-7 (很贵)
 
+4. n1n
+url:https://api.n1n.ai
+key:XXX
+model:
+- gemini-3.1-pro-preview
+
 """
 
 
