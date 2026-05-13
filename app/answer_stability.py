@@ -100,6 +100,27 @@ STOPWORDS = set([
 ])
 
 
+def _extract_article_summary(text):
+    """从API返回内容中提取"文章汇总"章节，到---或下一个##标题为止"""
+    import re
+    # 匹配"文章汇总"章节：到---或下一个##标题或文本结束
+    pattern = re.compile(r'##\s*文章汇总\s*\n(.*?)(?=\n---|\n##\s|\Z)', re.DOTALL)
+    match = pattern.search(text)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def _fill_article_template(article_list_text):
+    """将文章列表文本填充到模板中，替换{{}}占位符"""
+    template_path = os.path.join(ROOT_DIR, 'docs', '提高回答质量', '提示词',
+                                  '通过文章URL或Title获取文章内容_模板填充.md')
+    with open(template_path, 'r', encoding='utf-8') as f:
+        template = f.read()
+    filled = template.replace('{{}}', article_list_text)
+    return filled
+
+
 def _get_articles_full(question: str, max_rounds: int = 12, system_prompt: str = "") -> list:
     """多轮对话获取文章，返回每轮内容的列表（不丢弃中间轮次的文章原文）
     question: 搜索关键词（B列提示词或A列问题）
@@ -642,12 +663,12 @@ def _filter_skills_outputs(user_query, products):
 
 
 def _parse_articles_from_text(text):
-    """将C列文章内容按NTPSID标记拆分为逐篇文章列表
+    """将文章内容按标记拆分为逐篇文章列表
 
-    每篇文章格式：
+    支持两种格式：
       ## {序号}. NTPSID: {数字id}
-      ...文章正文...
-      ---
+      ## 文章{序号}：{标题}
+    以 --- 或不同的文章标题作为分隔
     """
     import re
     if not text or not text.strip():
@@ -657,20 +678,28 @@ def _parse_articles_from_text(text):
     separator_pattern = re.compile(r'^---$', re.MULTILINE)
     segments = separator_pattern.split(text)
 
-    # 用 NTPSID 标记识别每篇文章
+    # 两种文章标题格式
     ntpsid_pattern = re.compile(r'^##\s*\d+\.\s*NTPSID:\s*\d+', re.MULTILINE)
+    article_title_pattern = re.compile(r'^##\s*文章\d+[：:]', re.MULTILINE)
+
     articles = []
 
     for segment in segments:
         segment = segment.strip()
         if not segment:
             continue
-        # 找到所有NTPSID标记位置
+
+        # 优先按NTPSID标记拆分
         matches = list(ntpsid_pattern.finditer(segment))
         if not matches:
-            # 没有NTPSID标记，整段作为一篇文章
+            # 其次按"文章N："标记拆分
+            matches = list(article_title_pattern.finditer(segment))
+
+        if not matches:
+            # 没有任何标记，整段作为一篇文章
             articles.append(segment)
             continue
+
         for i, m in enumerate(matches):
             start = m.start()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(segment)
@@ -1236,12 +1265,45 @@ def stability_process():
                             'step_id': 'articles', 'step_label': '读取文章内容(Excel C列)',
                             'response': articles_full_text})
             else:
-                # C列为空，从知识库API获取
+                # C列为空，通过两步API获取文章内容
                 yield _sse({'type': 'step_start', 'question_idx': q_idx,
                             'step_id': 'articles', 'step_label': '获取文章内容(知识库API)',
                             'system_prompt': '(通过5007知识库API获取)', 'user_prompt': kb_prompt or question})
                 try:
-                    article_parts = _get_articles_full(question, system_prompt=kb_prompt or question)
+                    # ---- Step 1: 第一次API调用，获取文章列表 ----
+                    _log(f"[stability] row={row_num} Step1: 第一次API调用，获取文章列表")
+                    raw_parts = _get_articles_full(question, system_prompt=kb_prompt or question)
+                    raw_text = '\n\n'.join(raw_parts)
+                    _log(f"[stability] row={row_num} Step1: API返回内容（长度={len(raw_text)}）:\n{raw_text}")
+
+                    # 提取"文章汇总"章节
+                    article_summary = _extract_article_summary(raw_text)
+                    _log(f"[stability] row={row_num} Step1: 提取到文章汇总（长度={len(article_summary)}）:\n{article_summary}")
+
+                    if not article_summary:
+                        _log(f"[stability] row={row_num} Step1: 未找到文章汇总章节，使用原始返回内容")
+                        article_parts = []
+                        for part in raw_parts:
+                            article_parts.extend(_parse_articles_from_text(part))
+                    else:
+                        # ---- Step 2: 填充模板，第二次API调用获取文章原文 ----
+                        filled_prompt = _fill_article_template(article_summary)
+                        _log(f"[stability] row={row_num} Step2: 填充后的模板提示词（长度={len(filled_prompt)}）:\n{filled_prompt}")
+
+                        yield _sse({'type': 'step_start', 'question_idx': q_idx,
+                                    'step_id': 'articles_fetch', 'step_label': '获取文章原文(第二次API)',
+                                    'system_prompt': filled_prompt[:300], 'user_prompt': question[:200]})
+
+                        _log(f"[stability] row={row_num} Step2: 第二次API调用，获取文章原文")
+                        fetch_parts = _get_articles_full("获取文章内容", system_prompt=filled_prompt)
+                        fetch_text = '\n\n'.join(fetch_parts)
+                        _log(f"[stability] row={row_num} Step2: 第二次API返回内容（长度={len(fetch_text)}）:\n{fetch_text}")
+
+                        # 拆分文章
+                        article_parts = []
+                        for part in fetch_parts:
+                            article_parts.extend(_parse_articles_from_text(part))
+
                     articles_full_text = '\n\n'.join(article_parts)
                     products['articles_text'] = articles_full_text
                     for pi, part in enumerate(article_parts):
