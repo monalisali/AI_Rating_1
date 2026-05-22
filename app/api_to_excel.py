@@ -7,58 +7,12 @@ API请求脚本 - 获取AI回答并保存到Excel表格
 """
 
 import json
-import ssl
 import sys
-import urllib.request
 from datetime import datetime
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 
-
-def request_api(message: str, session_id: str = "", custom_system_prompt: str = "") -> tuple:
-    """
-    请求API接口并返回content值和session_id
-
-    Args:
-        message: 用户问题
-        session_id: 会话ID（可选）
-        custom_system_prompt: 自定义系统提示词（可选）
-
-    Returns:
-        (api_response, session_id) 元组
-    """
-    url = 'https://ai.tech.tax.asia.pwcinternal.com:5007/api/chat-stream'
-    payload = {
-        'message': message,
-        'session_id': session_id,
-        'parallel': False,
-        'stability': False
-    }
-    if custom_system_prompt:
-        payload['custom_system_prompt'] = custom_system_prompt
-    data = json.dumps(payload).encode('utf-8')
-
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            'Content-Type': 'application/json',
-            'Accept': 'text/event-stream'
-        }
-    )
-
-    # 配置SSL（跳过证书验证）
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-
-    # 发送请求
-    with urllib.request.urlopen(req, context=ctx, timeout=300) as response:
-        # 从响应头获取session_id
-        returned_session_id = response.headers.get('X-Session-Id', '')
-        result = response.read().decode('utf-8')
-
-    return result, returned_session_id
+from app.app import request_api
 
 
 def parse_response(api_response: str) -> dict:

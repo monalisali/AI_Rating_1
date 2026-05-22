@@ -43,6 +43,16 @@ model:
 - gemini-3.1-pro-preview
 - gpt-5.5
 
+5. 后端服务
+1) 5007: https://ai.tech.tax.asia.pwcinternal.com:5007/api/chat-stream
+2) claude agent: http://127.0.0.1:8000/chat-stream
+
+
+6. 启用哪些文章搜索工具
+# 1=search_by_index_files, 2=search_es_by_keyword, 3=advanced_es_search,
+# 4=search_milvus_vector, 5=web_search，6=get_related_articles
+# 空列表=传递所有搜索工具给LLM
+enabled_search_tools：[]
 """
 
 
@@ -145,13 +155,14 @@ def request_api(message: str, session_id: str = "", custom_system_prompt: str = 
     import http.client
     import threading
 
-    url = 'https://ai.tech.tax.asia.pwcinternal.com:5007/api/chat-stream'
+    url = get_config('kb_api_url', 'https://ai.tech.tax.asia.pwcinternal.com:5007/api/chat-stream')
     payload = {
         'message': message,
         'session_id': session_id,
         'model': get_config('model', 'glm-5.1'),
         'parallel': False,
-        'stability': False
+        'stability': False,
+        'enabled_search_tools':get_config('enabled_search_tools','[]')
     }
     if custom_system_prompt:
         payload['custom_system_prompt'] = custom_system_prompt

@@ -15,5 +15,7 @@
     "min_accuracy_score": 40,
     "group_max_chars": 12000,
     "group_sim_threshold": 0.6,
-    "merge_cc_sim_threshold": 0.85
+    "merge_cc_sim_threshold": 0.85,
+    "kb_api_url": "http://127.0.0.1:8000/chat-stream",
+    "enabled_search_tools":[1,6]
 }
