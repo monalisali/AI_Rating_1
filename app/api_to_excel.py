@@ -30,7 +30,9 @@ def request_api(message: str, session_id: str = "", custom_system_prompt: str = 
     url = 'https://ai.tech.tax.asia.pwcinternal.com:5007/api/chat-stream'
     payload = {
         'message': message,
-        'session_id': session_id
+        'session_id': session_id,
+        'parallel': False,
+        'stability': False
     }
     if custom_system_prompt:
         payload['custom_system_prompt'] = custom_system_prompt

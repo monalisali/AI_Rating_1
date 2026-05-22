@@ -11,11 +11,18 @@ GTS模型智谱：saas.glm-5.1
 
 
 1. GTS模型配置：
-url: https://genai-sharedservice-uat.cn.asia.pwcinternal.com
+1.1 UAT
+url: https://genai-sharedservice-uat.cn.asia.pwcinternal.com 或 https://genai-sharedservice-uat.cn.asia.pwcinternal.com/v1
 key: sk-JLfi9OVwSLESgKy0Xw_N2w
+
+1.2 生产（尽量不要用）
+url: https://genai-sharedservice.cn.asia.pwcinternal.com
+key：sk-x4QkmpDjaxpbdynon76EeA
+
 model:
 -saas.glm-5.1
 -saas.qwen3.5-plus
+-saas.deepseek-v4-pro
 
 2. 智谱官方
 url: https://open.bigmodel.cn/api/paas/v4
@@ -30,10 +37,11 @@ model:
 - bedrock.anthropic.claude-opus-4-7 (很贵)
 
 4. n1n
-url:https://api.n1n.ai
+url:https://api.n1n.ai  / https://api.n1n.ai/v1
 key:XXX
 model:
 - gemini-3.1-pro-preview
+- gpt-5.5
 
 """
 
@@ -141,7 +149,9 @@ def request_api(message: str, session_id: str = "", custom_system_prompt: str = 
     payload = {
         'message': message,
         'session_id': session_id,
-        'model': get_config('model', 'glm-5.1')
+        'model': get_config('model', 'glm-5.1'),
+        'parallel': False,
+        'stability': False
     }
     if custom_system_prompt:
         payload['custom_system_prompt'] = custom_system_prompt

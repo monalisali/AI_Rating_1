@@ -8,9 +8,8 @@
 import os
 import json
 import queue
-import urllib.request
-import threading
 import time
+import requests
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
@@ -215,7 +214,7 @@ def _call_llm(system_prompt, user_prompt, temperature=0.01, max_tokens=2000, tim
         raise ValueError("LLM API未配置（llm_base_url/llm_api_key/model）")
 
     url = base_url + '/v1/chat/completions'
-
+    _log("_call_llm url:" + url)
     messages = []
     if system_prompt:
         messages.append({'role': 'system', 'content': system_prompt})
@@ -224,51 +223,37 @@ def _call_llm(system_prompt, user_prompt, temperature=0.01, max_tokens=2000, tim
     body = {'model': model, 'messages': messages, 'temperature': temperature}
     if max_tokens > 0:
         body['max_tokens'] = max_tokens
-    data = json.dumps(body).encode('utf-8')
+    data = json.dumps(body, ensure_ascii=False).encode('utf-8')
+
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {key}',
+    }
 
     for attempt in range(1, max_retries + 1):
-        result = [None, None]
-
-        def _do():
+        try:
+            resp = requests.post(url, data=data, headers=headers, timeout=timeout, verify=False)
+            _log(f"[stability] _call_llm HTTP状态={resp.status_code} 响应长度={len(resp.text)}")
+            resp.raise_for_status()
             try:
-                req = urllib.request.Request(url, data=data, headers={
-                    'Content-Type': 'application/json',
-                    'Authorization': f'Bearer {key}'
-                })
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    raw = resp.read().decode('utf-8')
-                    r = json.loads(raw)
-                    if 'error' in r:
-                        _log(f"[stability] _call_llm API返回错误: {r['error']}")
-                        result[1] = RuntimeError(str(r['error']))
-                    elif 'choices' in r and r['choices']:
-                        content = r['choices'][0]['message']['content']
-                        _log(f"[stability] _call_llm 模型={model} temperature={temperature} 返回长度={len(content) if content else 0}")
-                        result[0] = content
-                    else:
-                        _log(f"[stability] _call_llm API返回格式异常: {raw[:300]}")
-                        result[1] = RuntimeError(f"API返回格式异常: {str(r)[:200]}")
-            except Exception as e:
-                _log(f"[stability] _call_llm 请求异常: {e}")
-                result[1] = e
-
-        t = threading.Thread(target=_do, daemon=True)
-        t.start()
-        t.join(timeout=timeout + 30)
-
-        if t.is_alive():
+                r = resp.json()
+            except Exception:
+                _log(f"[stability] _call_llm JSON解析失败，原始响应前500字: {resp.text[:500]}")
+                raise
+            if 'error' in r:
+                _log(f"[stability] _call_llm API返回错误: {r['error']}")
+                if attempt >= max_retries:
+                    raise RuntimeError(str(r['error']))
+                time.sleep(min(attempt * 2, 10))
+                continue
+            content = r['choices'][0]['message']['content']
+            _log(f"[stability] _call_llm 模型={model} temperature={temperature} 返回长度={len(content) if content else 0}")
+            return content
+        except Exception as e:
+            _log(f"[stability] _call_llm 请求异常(第{attempt}次): {e}")
             if attempt >= max_retries:
-                raise TimeoutError(f"LLM调用超时（>{timeout + 30}秒）")
-            continue
-
-        if result[1] is not None:
-            if attempt >= max_retries:
-                raise result[1]
+                raise
             time.sleep(min(attempt * 2, 10))
-            continue
-
-        if result[0] is not None:
-            return result[0]
 
     raise RuntimeError("LLM调用失败")
 
@@ -1251,6 +1236,7 @@ def stability_process():
             # ---- Step 1: Get articles ----
             if c_articles:
                 # C列有文章内容，直接拆分使用，跳过知识库API
+                _log(f"\n{'='*60}\n[stability] ----------------Step 1: 从Excel C列读取文章---------------------\n{'='*60}")
                 _log(f"[stability] row={row_num} 从Excel C列读取文章（长度={len(c_articles)}）")
                 yield _sse({'type': 'step_start', 'question_idx': q_idx,
                             'step_id': 'articles', 'step_label': '读取文章内容(Excel C列)',
@@ -1270,40 +1256,46 @@ def stability_process():
                             'step_id': 'articles', 'step_label': '获取文章内容(知识库API)',
                             'system_prompt': '(通过5007知识库API获取)', 'user_prompt': kb_prompt or question})
                 try:
-                    # ---- Step 1: 第一次API调用，获取文章列表 ----
-                    _log(f"[stability] row={row_num} Step1: 第一次API调用，获取文章列表")
+                    # ---- Step 1a: 第一次API调用，获取文章列表 ----
+                    _log(f"\n{'='*60}\n[stability] ----------------Step 1a: 第一次API调用，获取文章列表---------------------\n{'='*60}")
+                    _log(f"[stability] row={row_num} message={question}, system_prompt={kb_prompt or question}")
                     raw_parts = _get_articles_full(question, system_prompt=kb_prompt or question)
                     raw_text = '\n\n'.join(raw_parts)
-                    _log(f"[stability] row={row_num} Step1: API返回内容（长度={len(raw_text)}）:\n{raw_text}")
+                    _log(f"[stability] row={row_num} Step1a API返回内容（长度={len(raw_text)}）:\n{raw_text}")
 
-                    # 提取"文章汇总"章节
+                    # ---- Step 1b: 提取"文章汇总"章节 ----
+                    _log(f"\n{'='*60}\n[stability] ----------------Step 1b: 提取文章汇总章节---------------------\n{'='*60}")
                     article_summary = _extract_article_summary(raw_text)
-                    _log(f"[stability] row={row_num} Step1: 提取到文章汇总（长度={len(article_summary)}）:\n{article_summary}")
+                    _log(f"[stability] row={row_num} Step1b 提取到文章汇总（长度={len(article_summary)}）:\n{article_summary}")
 
                     if not article_summary:
-                        _log(f"[stability] row={row_num} Step1: 未找到文章汇总章节，使用原始返回内容")
+                        _log(f"[stability] row={row_num} Step1b 未找到文章汇总章节，使用原始返回内容")
                         article_parts = []
                         for part in raw_parts:
                             article_parts.extend(_parse_articles_from_text(part))
                     else:
-                        # ---- Step 2: 填充模板，第二次API调用获取文章原文 ----
+                        # ---- Step 1c: 填充模板，第二次API调用获取文章原文 ----
+                        _log(f"\n{'='*60}\n[stability] ----------------Step 1c: 填充模板 + 第二次API调用获取文章原文---------------------\n{'='*60}")
                         filled_prompt = _fill_article_template(article_summary)
-                        _log(f"[stability] row={row_num} Step2: 填充后的模板提示词（长度={len(filled_prompt)}）:\n{filled_prompt}")
+                        _log(f"[stability] row={row_num} Step1c 填充后的模板提示词（长度={len(filled_prompt)}）:\n{filled_prompt}")
 
                         yield _sse({'type': 'step_start', 'question_idx': q_idx,
                                     'step_id': 'articles_fetch', 'step_label': '获取文章原文(第二次API)',
                                     'system_prompt': filled_prompt[:300], 'user_prompt': question[:200]})
 
-                        _log(f"[stability] row={row_num} Step2: 第二次API调用，获取文章原文")
+                        _log(f"[stability] row={row_num} Step1c 第二次API调用，获取文章原文")
                         fetch_parts = _get_articles_full("获取文章内容", system_prompt=filled_prompt)
                         fetch_text = '\n\n'.join(fetch_parts)
-                        _log(f"[stability] row={row_num} Step2: 第二次API返回内容（长度={len(fetch_text)}）:\n{fetch_text}")
+                        _log(f"[stability] row={row_num} Step1c 第二次API返回内容（长度={len(fetch_text)}）:\n{fetch_text}")
 
                         # 拆分文章
+                        _log(f"\n{'='*60}\n[stability] ----------------Step 1d: 文章拆分---------------------\n{'='*60}")
                         article_parts = []
                         for part in fetch_parts:
                             article_parts.extend(_parse_articles_from_text(part))
+                        _log(f"[stability] row={row_num} Step1d 拆分得到{len(article_parts)}篇文章")
 
+                    _log(f"\n{'='*60}\n[stability] ----------------Step 1 完成: 文章汇总---------------------\n{'='*60}")
                     articles_full_text = '\n\n'.join(article_parts)
                     products['articles_text'] = articles_full_text
                     for pi, part in enumerate(article_parts):
@@ -1321,8 +1313,8 @@ def stability_process():
                     articles_full_text = article_parts[0]
                     products['articles_text'] = articles_full_text
 
-            # ---- Step 2: Group articles + Combined Skill ----
-            # 2a: 分组（基于BGE-M3向量相似度）
+            # ---- Step 2a: Group articles ----
+            _log(f"\n{'='*60}\n[stability] ----------------Step 2a: BGE-M3向量文章分组---------------------\n{'='*60}")
             max_chars = get_config('group_max_chars', 12000)
             sim_threshold = get_config('group_sim_threshold', 0.6)
             _log(f"[stability] row={row_num} 开始分组（max_chars={max_chars}, sim_threshold={sim_threshold}）")
@@ -1343,7 +1335,7 @@ def stability_process():
                 import re
                 art_ids = []
                 for art in g:
-                    m = re.search(r'NTPSID:\s*(\d+)', art)
+                    m = re.search(r'NTPS\s*ID[：:]*\s*(\d+)', art, re.IGNORECASE)
                     art_ids.append(f"ART_{m.group(1)}" if m else f"(未知)")
                 total_chars = sum(len(a) for a in g)
                 _log(f"[stability]   组{gi+1}: 文章={art_ids}, 总字符数={total_chars}")
@@ -1352,6 +1344,7 @@ def stability_process():
                         'response': f"分为{len(groups)}组: {group_info}"})
 
             # 2b: 每组调用合并Skill（并行）
+            _log(f"\n{'='*60}\n[stability] ----------------Step 2b: 并行LLM抽取四类信息---------------------\n{'='*60}")
             task_queue = queue.Queue()
 
             def _run_combined(group_idx, group_articles):
@@ -1363,7 +1356,7 @@ def stability_process():
                     arts_text_parts = []
                     group_art_ids = []
                     for ai, art in enumerate(group_articles):
-                        ntpsid_match = re.search(r'NTPSID:\s*(\d+)', art)
+                        ntpsid_match = re.search(r'NTPS\s*ID[：:]*\s*(\d+)', art, re.IGNORECASE)
                         art_id = f"ART_{ntpsid_match.group(1)}" if ntpsid_match else f"ART_{row_num}_G{group_idx+1}_P{ai+1}"
                         group_art_ids.append(art_id)
                         arts_text_parts.append(f"### 文章ID: {art_id}\n{art}")
@@ -1387,57 +1380,65 @@ def stability_process():
                             'system_prompt': COMBINED_SKILL_SYSTEM[:300],
                             'user_prompt': f'组{gi+1}: {len(group)}篇文章'})
 
-            with ThreadPoolExecutor(max_workers=min(thread_count, len(groups))) as executor:
-                for gi, group in enumerate(groups):
-                    executor.submit(_run_combined, gi, group)
-
+            if not groups:
+                _log(f"[stability] row={row_num} 分组结果为空，跳过并行抽取")
                 all_cc_pairs = []
                 all_scenes = []
                 all_relations = []
                 all_time_constraints = []
-                completed = 0
+            else:
+                with ThreadPoolExecutor(max_workers=min(thread_count, len(groups))) as executor:
+                    for gi, group in enumerate(groups):
+                        executor.submit(_run_combined, gi, group)
 
-                while completed < len(groups):
-                    sid, label, resp, parsed, error, group_art_ids = task_queue.get()
-                    completed += 1
-                    if error:
-                        _log(f"[stability] row={row_num} {label}失败: {error}")
-                        yield _sse({'type': 'step_error', 'question_idx': q_idx,
-                                    'step_id': sid, 'step_label': label, 'error': error})
-                    else:
-                        _log(f"[stability] row={row_num} {label}完成，原始响应:\n{resp}")
-                        if parsed and isinstance(parsed, dict):
-                            cc = parsed.get('condition_conclusion_pairs', [])
-                            scenes = parsed.get('policy_scenes', [])
-                            rels = parsed.get('concept_relations', [])
-                            tcs = parsed.get('time_constraints', [])
-                            # 概念关系字段名映射
-                            for item in rels:
-                                if isinstance(item, dict):
-                                    item.setdefault('entity_a', item.pop('concept_A', ''))
-                                    item.setdefault('entity_b', item.pop('concept_B', ''))
-                                    item.setdefault('relation_type', item.pop('relation', ''))
-                            # 规范化article_ids
-                            for item in cc + tcs + rels:
-                                if isinstance(item, dict):
-                                    aid = item.pop('article_id', None)
-                                    if aid and 'article_ids' not in item:
-                                        item['article_ids'] = [aid] if isinstance(aid, str) else aid
-                                    # 如果仍无article_ids，用本组的文章ID回填
-                                    if not item.get('article_ids'):
-                                        item['article_ids'] = list(group_art_ids)
-                            all_cc_pairs.extend(cc if isinstance(cc, list) else [])
-                            all_scenes.extend(scenes if isinstance(scenes, list) else [])
-                            all_relations.extend(rels if isinstance(rels, list) else [])
-                            all_time_constraints.extend(tcs if isinstance(tcs, list) else [])
-                            _log(f"[stability] row={row_num} {label} → 条件-结论={len(cc)}, "
-                                 f"场景={len(scenes)}, 断言={len(rels)}, 时间={len(tcs)}")
-                        yield _sse({'type': 'step_complete', 'question_idx': q_idx,
-                                    'step_id': sid, 'step_label': label,
-                                    'response': resp, 'parsed': parsed})
+                    all_cc_pairs = []
+                    all_scenes = []
+                    all_relations = []
+                    all_time_constraints = []
+                    completed = 0
+
+                    while completed < len(groups):
+                        sid, label, resp, parsed, error, group_art_ids = task_queue.get()
+                        completed += 1
+                        if error:
+                            _log(f"[stability] row={row_num} {label}失败: {error}")
+                            yield _sse({'type': 'step_error', 'question_idx': q_idx,
+                                        'step_id': sid, 'step_label': label, 'error': error})
+                        else:
+                            _log(f"[stability] row={row_num} {label}完成，原始响应:\n{resp}")
+                            if parsed and isinstance(parsed, dict):
+                                cc = parsed.get('condition_conclusion_pairs', [])
+                                scenes = parsed.get('policy_scenes', [])
+                                rels = parsed.get('concept_relations', [])
+                                tcs = parsed.get('time_constraints', [])
+                                # 概念关系字段名映射
+                                for item in rels:
+                                    if isinstance(item, dict):
+                                        item.setdefault('entity_a', item.pop('concept_A', ''))
+                                        item.setdefault('entity_b', item.pop('concept_B', ''))
+                                        item.setdefault('relation_type', item.pop('relation', ''))
+                                # 规范化article_ids
+                                for item in cc + tcs + rels:
+                                    if isinstance(item, dict):
+                                        aid = item.pop('article_id', None)
+                                        if aid and 'article_ids' not in item:
+                                            item['article_ids'] = [aid] if isinstance(aid, str) else aid
+                                        # 如果仍无article_ids，用本组的文章ID回填
+                                        if not item.get('article_ids'):
+                                            item['article_ids'] = list(group_art_ids)
+                                all_cc_pairs.extend(cc if isinstance(cc, list) else [])
+                                all_scenes.extend(scenes if isinstance(scenes, list) else [])
+                                all_relations.extend(rels if isinstance(rels, list) else [])
+                                all_time_constraints.extend(tcs if isinstance(tcs, list) else [])
+                                _log(f"[stability] row={row_num} {label} → 条件-结论={len(cc)}, "
+                                     f"场景={len(scenes)}, 断言={len(rels)}, 时间={len(tcs)}")
+                            yield _sse({'type': 'step_complete', 'question_idx': q_idx,
+                                        'step_id': sid, 'step_label': label,
+                                        'response': resp, 'parsed': parsed})
 
             # 2c: 跨组合并去重
-            _log(f"[stability] row={row_num} 开始跨组合并（条件-结论={len(all_cc_pairs)}, "
+            _log(f"\n{'='*60}\n[stability] ----------------Step 2c: 跨组合并去重---------------------\n{'='*60}")
+            _log(f"[stability] row={row_num} 合并前（条件-结论={len(all_cc_pairs)}, "
                  f"场景={len(all_scenes)}, 断言={len(all_relations)}, "
                  f"时间约束={len(all_time_constraints)}）")
 
@@ -1450,7 +1451,8 @@ def stability_process():
                  f"场景={len(products['scene_enum'])}个, 断言={len(products['assertions_raw'])}条, "
                  f"时间约束={len(products['time_constraints'])}条")
 
-            # ---- Step 2d: 三层过滤（相关性→置信度→冲突消解）----
+            # ---- Step 2d: 三层过滤 ----
+            _log(f"\n{'='*60}\n[stability] ----------------Step 2d: 三层过滤（相关性+置信度+冲突消解）---------------------\n{'='*60}")
             yield _sse({'type': 'step_start', 'question_idx': q_idx,
                         'step_id': 'filtering', 'step_label': '三层过滤(相关性+置信度+冲突消解)',
                         'system_prompt': '(纯代码规则过滤，不调用LLM)' if FILTER_ENABLED else '(已禁用)',
@@ -1487,7 +1489,8 @@ def stability_process():
                                     f"断言={len(products['filtered_assertions']) if isinstance(products['filtered_assertions'], list) else '未启用'}, "
                                     f"时间={len(products['filtered_time_constraints']) if isinstance(products['filtered_time_constraints'], list) else '未启用'}"})
 
-            # ---- Step 2e: 多维评分过滤（语义+实体重叠+逻辑独特度+结构重要性）----
+            # ---- Step 2e: 多维评分过滤 ----
+            _log(f"\n{'='*60}\n[stability] ----------------Step 2e: 多维评分过滤（按权重排序截断）---------------------\n{'='*60}")
             yield _sse({'type': 'step_start', 'question_idx': q_idx,
                         'step_id': 'score_filtering', 'step_label': '多维评分过滤(按权重排序截断)',
                         'system_prompt': '(四维评分排序，不调用LLM)' if SCORE_FILTER_ENABLED else '(已禁用)',
@@ -1524,6 +1527,7 @@ def stability_process():
                                     f"时间={len(products['score_filtered_time_constraints']) if isinstance(products['score_filtered_time_constraints'], list) else '未启用'}"})
 
             # ---- Step 3: Validate assertions ----
+            _log(f"\n{'='*60}\n[stability] ----------------Step 3: 断言校验 + 转自然语言---------------------\n{'='*60}")
             # 数据源优先级：权重过滤 > 阈值过滤 > 合并后
             if SCORE_FILTER_ENABLED and isinstance(products.get('score_filtered_condition_pairs'), list):
                 cc_for_prompt = products['score_filtered_condition_pairs']
@@ -1561,6 +1565,8 @@ def stability_process():
                         'details': f"原始{raw_count}条 → 清洗后{len(cleaned)}条"})
 
             # ---- Step 4: Assemble final prompt ----
+            _log(f"\n{'='*60}\n[stability] ----------------Step 4: 组装最终提示词（Prompt.md模板）---------------------\n{'='*60}")
+            _log(f"[stability] row={row_num} 条件-结论对={raw_cc_count}条, 政策场景={raw_scene_count}个, 时间约束={raw_tc_count}条, 概念约束={len(constraint_texts)}条")
             final_prompt = _assemble_final_prompt(
                 question,
                 cc_for_prompt,
@@ -1573,6 +1579,7 @@ def stability_process():
             yield _sse({'type': 'final_prompt', 'question_idx': q_idx, 'prompt': final_prompt})
 
             # ---- Step 5: Generate final answer ----
+            _log(f"\n{'='*60}\n[stability] ----------------Step 5: 生成最终回答（当前已禁用）---------------------\n{'='*60}")
             yield _sse({'type': 'step_start', 'question_idx': q_idx,
                         'step_id': 'final_answer', 'step_label': '生成最终回答',
                         'system_prompt': FINAL_ANSWER_SYSTEM, 'user_prompt': final_prompt})
