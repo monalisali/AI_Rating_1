@@ -74,7 +74,7 @@ def model_scoring_upload():
 def _process_one_question(row_num, question, prompt, reference_answer, scoring_prompt_template):
     """处理单个问题：用指定提示词获取AI回答 + 评分"""
     try:
-        logger.info(f"[model_scoring] row={row_num} 开始调用5007 API获取AI回答...")
+        logger.info(f"[model_scoring] row={row_num} 开始调用API获取AI回答...")
         answer = chat_with_confirmation(question, system_prompt=prompt)
         logger.info(f"[model_scoring] row={row_num} AI回答完成（长度={len(answer)}）")
 

@@ -31,10 +31,11 @@ model：
 -glm-5.1
 
 3. 加油站
-url: http://ai.tech.tax.asia.pwcinternal.com:3002
+url: http://ai.tech.tax.asia.pwcinternal.com:3002/v1
 key: sk-wKJ3gwHNsyZL3oZDZrOMYlQbLbCxY8QpLDxRYMqCGp9Ms4fz
 model:
-- bedrock.anthropic.claude-opus-4-7 (很贵)
+-glm-5.1 
+-bedrock.anthropic.claude-opus-4-7 (很贵)
 
 4. n1n
 url:https://api.n1n.ai  / https://api.n1n.ai/v1
@@ -46,7 +47,7 @@ model:
 5. 后端服务
 1) 5007: https://ai.tech.tax.asia.pwcinternal.com:5007/api/chat-stream
 2) claude agent: http://127.0.0.1:8000/chat-stream
-
+3) 测试站点：https://ai-test.tech.tax.asia.pwcinternal.com:5008/api/chat-stream
 
 6. 启用哪些文章搜索工具
 # 1=search_by_index_files, 2=search_es_by_keyword, 3=advanced_es_search,
@@ -160,8 +161,8 @@ def request_api(message: str, session_id: str = "", custom_system_prompt: str = 
         'message': message,
         'session_id': session_id,
         'model': get_config('model', 'glm-5.1'),
-        'parallel': False,
-        'stability': False,
+        'parallel': False, # 是否启用双AI
+        'stability': False, # 是否启用增强提示词
         'enabled_search_tools':get_config('enabled_search_tools','[]')
     }
     if custom_system_prompt:
@@ -172,6 +173,8 @@ def request_api(message: str, session_id: str = "", custom_system_prompt: str = 
         payload['llm_api_key'] = llm_api_key
     if llm_base_url:
         payload['llm_base_url'] = llm_base_url
+    log_payload = {k: (v[:200] if isinstance(v, str) and k == 'custom_system_prompt' else v) for k, v in payload.items()}
+    logger.info(f"[request_api] url={url}, payload={json.dumps(log_payload, ensure_ascii=False)}")
     data = json.dumps(payload).encode('utf-8')
 
     req = urllib.request.Request(url, data=data, headers={
